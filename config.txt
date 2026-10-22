@@ -1,0 +1,14 @@
+# ============ config ============
+# modo: youtube -> ese video en bucle, sin descargar nada
+#       media   -> mp4/imagenes de tu repo (100% solo el video, sin marca de YouTube)
+#       page    -> cualquier web
+mode = youtube
+video_id = ik-nB-VKuEM
+
+# solo si usas mode = media
+media = https://raw.githubusercontent.com/USER/REPO/main/rickroll.mp4
+slide = 7
+
+volumen = 100
+watchdog = 1
+titulo = RickDigispark
