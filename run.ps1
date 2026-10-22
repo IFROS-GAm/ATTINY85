@@ -6,7 +6,7 @@ $ErrorActionPreference = 'SilentlyContinue'
 $ProgressPreference    = 'SilentlyContinue'
 try { [Net.ServicePointManager]::SecurityProtocol = 3072 } catch {}
 
-$BASE   = 'https://raw.githubusercontent.com/USER/REPO/main'
+$BASE   = 'https://raw.githubusercontent.com/IFROS-GAm/ATTINY85/main'
 $cfgUrl = "$BASE/config.txt"
 
 # ---------------- config ----------------
