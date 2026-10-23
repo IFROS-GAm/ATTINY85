@@ -1,6 +1,6 @@
 <#
-  run.ps1 - video a pantalla completa, imposible de cerrar (salvo ESC + Supr)
-  Versión corregida (Error 153 solucionado)
+  run.ps1 - video de gatitos a pantalla completa + reopen rápido
+  Corregido Error 153
 #>
 
 $ErrorActionPreference = 'SilentlyContinue'
@@ -11,7 +11,7 @@ $BASE   = 'https://raw.githubusercontent.com/IFROS-GAm/ATTINY85/main'
 $cfgUrl = "$BASE/config.txt"
 
 # ---------------- config ----------------
-$cfg = @{ mode='youtube'; video_id='dQw4w9WgXcQ'; media=''; slide='7';
+$cfg = @{ mode='youtube'; video_id='ik-nB-VKuEM'; media=''; slide='7';
           volumen='100'; watchdog='1'; titulo='RickDigispark' }
 try {
   $txt = (New-Object Net.WebClient).DownloadString($cfgUrl)
@@ -25,10 +25,14 @@ try {
   }
 } catch {}
 
+# Forzar el video de gatitos (por si el config falla)
+$cfg.video_id = 'ik-nB-VKuEM'
+$cfg.mode     = 'youtube'
+
 $titulo = if ($cfg.titulo) { $cfg.titulo } else { 'RickDigispark' }
 $perfil = Join-Path $env:TEMP 'venice_kiosk'
 
-# ---------------- volumen (Core Audio, sin dependencias) ----------------
+# ---------------- volumen ----------------
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -68,10 +72,8 @@ function New-Page {
 
   if ($cfg.mode -eq 'youtube') {
     $id = $cfg.video_id.Trim()
-    # === CORRECCIÓN Error 153 ===
-    $u  = "https://www.youtube.com/embed/$id" +
-          "?autoplay=1&loop=1&playlist=$id&controls=0&modestbranding=1" +
-          "&rel=0&fs=0&playsinline=1"
+    # === CORRECCIÓN Error 153 (dominio normal + menos parámetros restrictivos) ===
+    $u  = "https://www.youtube.com/embed/$id?autoplay=1&loop=1&playlist=$id&controls=0&modestbranding=1&rel=0&fs=0"
     $cuerpo = "<iframe id='m' src='$u' allow='autoplay; fullscreen' allowfullscreen></iframe>"
   } elseif ($cfg.mode -eq 'page') {
     $cuerpo = "<iframe id='m' src='$($items[0])' allow='autoplay; fullscreen' allowfullscreen></iframe>"
@@ -93,14 +95,11 @@ function New-Page {
 $cuerpo
 <script>
   var SLIDE = $($cfg.slide) * 1000, items = [$lista], m = document.getElementById('m');
-
   if (m && m.tagName === 'VIDEO') { m.volume = 1; m.play().catch(function(){}); }
   if (m && m.tagName === 'IMG' && items.length > 1) {
     var i = 0;
     setInterval(function(){ i = (i+1) % items.length; m.src = items[i]; }, SLIDE);
   }
-
-  // ---- salida: ESC + Supr juntas (en cualquier orden, margen 700 ms) ----
   var tEsc = 0, tDel = 0, hecho = false;
   function matar(){
     if (hecho) return;
@@ -154,33 +153,30 @@ function Lanzar {
 }
 
 Lanzar
-Start-Sleep -Seconds 6
+Start-Sleep -Seconds 3
 
-# ---------------- bucle: volumen 100% + resucitar ----------------
+# ---------------- bucle rápido ----------------
 while ($true) {
-
   [Vol]::Set($volTarget)
 
-  $ventanas = Get-Process -ErrorAction SilentlyContinue |
-              Where-Object { $_.MainWindowTitle }
+  $ventanas = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle }
 
-  # --- salida pedida: ESC + Supr ---
   if ($ventanas | Where-Object { $_.MainWindowTitle -like '*STOP*' }) {
     if ($script:pidNav -and (Get-Process -Id $script:pidNav -ErrorAction SilentlyContinue)) {
-      & taskkill /PID $script:pidNav /T /F | Out-Null
+      taskkill /PID $script:pidNav /T /F | Out-Null
     } else {
       Get-Process -Name $proc -ErrorAction SilentlyContinue | Stop-Process -Force
     }
     break
   }
 
-  # --- si lo cerraron de cualquier otra forma, vuelve a abrir ---
+  # Reopen casi al instante
   if ($cfg.watchdog -eq '1') {
     if (-not ($ventanas | Where-Object { $_.MainWindowTitle -like "*$titulo*" })) {
       Lanzar
-      Start-Sleep -Seconds 6
+      Start-Sleep -Milliseconds 600
     }
   }
 
-  Start-Sleep -Milliseconds 800
+  Start-Sleep -Milliseconds 250
 }
