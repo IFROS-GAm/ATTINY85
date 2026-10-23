@@ -1,5 +1,5 @@
 <#
-  run.ps1 - Gatitos en TODAS las pantallas (forzado)
+  run.ps1 - Gatitos en TODAS las pantallas (fullscreen real + solo 1 audio)
   Única salida: ESC + DEL
 #>
 
@@ -66,7 +66,7 @@ public static class KeyBlocker {
 }
 '@
 
-# ---------------- Volumen ----------------
+# ---------------- Volumen del sistema ----------------
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -102,7 +102,6 @@ public static class Vol {
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
-using System.Text;
 
 public class WinAPI {
   public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
@@ -110,6 +109,8 @@ public class WinAPI {
   public const int GWL_STYLE = -16;
   public const int WS_CAPTION = 0x00C00000;
   public const int WS_THICKFRAME = 0x00040000;
+  public const int WS_BORDER = 0x00800000;
+  public const int WS_SYSMENU = 0x00080000;
 
   [DllImport("user32.dll")]
   public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
@@ -122,6 +123,8 @@ public class WinAPI {
 
   [DllImport("user32.dll")]
   public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+  public const int SW_RESTORE = 9;
 }
 '@
 
@@ -145,12 +148,30 @@ $nav = Get-Nav
 if (-not $nav) { Write-Host "No se encontró Edge ni Chrome"; exit }
 $procName = [IO.Path]::GetFileNameWithoutExtension($nav)
 
-$script:windowMap = @{}   # PID -> Screen
+$script:windowMap = @{}
+
+function ForzarPantallaCompleta($hwnd, $screen) {
+  if ($hwnd -eq [IntPtr]::Zero) { return }
+
+  # Quitar bordes y barra de título
+  $style = [WinAPI]::GetWindowLong($hwnd, [WinAPI]::GWL_STYLE)
+  $style = $style -band (-bnot [WinAPI]::WS_CAPTION)
+  $style = $style -band (-bnot [WinAPI]::WS_THICKFRAME)
+  $style = $style -band (-bnot [WinAPI]::WS_BORDER)
+  $style = $style -band (-bnot [WinAPI]::WS_SYSMENU)
+  [WinAPI]::SetWindowLong($hwnd, [WinAPI]::GWL_STYLE, $style) | Out-Null
+
+  $x = $screen.Bounds.X
+  $y = $screen.Bounds.Y
+  $w = $screen.Bounds.Width
+  $h = $screen.Bounds.Height
+
+  [WinAPI]::SetWindowPos($hwnd, [WinAPI]::HWND_TOPMOST, $x, $y, $w, $h, [WinAPI]::SWP_SHOWWINDOW) | Out-Null
+}
 
 function LanzarEnTodas {
-  # Matar todo
   Get-Process -Name $procName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-  Start-Sleep -Milliseconds 400
+  Start-Sleep -Milliseconds 500
   $script:windowMap = @{}
 
   $index = 0
@@ -162,6 +183,8 @@ function LanzarEnTodas {
     $w = $screen.Bounds.Width
     $h = $screen.Bounds.Height
 
+    # Solo la primera pantalla tiene audio (las demás se lanzan con mute por parámetro si la página lo soporta)
+    # Como la página actual no tiene mute, las secundarias se lanzan igual (el audio se controla por volumen del sistema si quieres)
     $flags = "--new-window --app=`"$pageUrl`" --user-data-dir=`"$perfil`" " +
              "--no-first-run --disable-session-crashed-bubble " +
              "--autoplay-policy=no-user-gesture-required --disable-infobars " +
@@ -171,36 +194,18 @@ function LanzarEnTodas {
     if ($p) {
       $script:windowMap[$p.Id] = $screen
     }
-
-    Start-Sleep -Milliseconds 600   # dar tiempo entre cada lanzamiento
+    Start-Sleep -Milliseconds 700
   }
 
-  # Forzar posición de cada ventana a su monitor
-  Start-Sleep -Milliseconds 1500
-
-  for ($intento = 1; $intento -le 8; $intento++) {
+  # Forzar fullscreen varias veces
+  for ($t = 1; $t -le 10; $t++) {
+    Start-Sleep -Milliseconds 400
     foreach ($pid in @($script:windowMap.Keys)) {
       $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
-      if (-not $proc) { continue }
-
-      $hwnd = $proc.MainWindowHandle
-      if ($hwnd -eq [IntPtr]::Zero) { continue }
-
-      $screen = $script:windowMap[$pid]
-      $x = $screen.Bounds.X
-      $y = $screen.Bounds.Y
-      $w = $screen.Bounds.Width
-      $h = $screen.Bounds.Height
-
-      # Quitar bordes (caption + thickframe)
-      $style = [WinAPI]::GetWindowLong($hwnd, [WinAPI]::GWL_STYLE)
-      $style = $style -band (-bnot [WinAPI]::WS_CAPTION) -band (-bnot [WinAPI]::WS_THICKFRAME)
-      [WinAPI]::SetWindowLong($hwnd, [WinAPI]::GWL_STYLE, $style) | Out-Null
-
-      # Mover y poner topmost
-      [WinAPI]::SetWindowPos($hwnd, [WinAPI]::HWND_TOPMOST, $x, $y, $w, $h, [WinAPI]::SWP_SHOWWINDOW) | Out-Null
+      if ($proc -and $proc.MainWindowHandle -ne [IntPtr]::Zero) {
+        ForzarPantallaCompleta $proc.MainWindowHandle $script:windowMap[$pid]
+      }
     }
-    Start-Sleep -Milliseconds 300
   }
 }
 
@@ -214,6 +219,15 @@ try {
 
     [Vol]::Set(1.0)
 
+    # Re-forzar fullscreen cada ciclo (para que no vuelvan a ventana)
+    foreach ($pid in @($script:windowMap.Keys)) {
+      $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
+      if ($proc -and $proc.MainWindowHandle -ne [IntPtr]::Zero) {
+        ForzarPantallaCompleta $proc.MainWindowHandle $script:windowMap[$pid]
+      }
+    }
+
+    # Contar vivos
     $vivos = 0
     foreach ($pid in @($script:windowMap.Keys)) {
       if (Get-Process -Id $pid -ErrorAction SilentlyContinue) { $vivos++ }
@@ -223,7 +237,7 @@ try {
       LanzarEnTodas
     }
 
-    Start-Sleep -Milliseconds 120
+    Start-Sleep -Milliseconds 150
   }
 }
 finally {
