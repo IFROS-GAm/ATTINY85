@@ -1,5 +1,6 @@
 <#
   run.ps1 - video a pantalla completa, imposible de cerrar (salvo ESC + Supr)
+  Versión corregida (Error 153 solucionado)
 #>
 
 $ErrorActionPreference = 'SilentlyContinue'
@@ -10,7 +11,7 @@ $BASE   = 'https://raw.githubusercontent.com/IFROS-GAm/ATTINY85/main'
 $cfgUrl = "$BASE/config.txt"
 
 # ---------------- config ----------------
-$cfg = @{ mode='youtube'; video_id='ik-nB-VKuEM'; media=''; slide='7';
+$cfg = @{ mode='youtube'; video_id='dQw4w9WgXcQ'; media=''; slide='7';
           volumen='100'; watchdog='1'; titulo='RickDigispark' }
 try {
   $txt = (New-Object Net.WebClient).DownloadString($cfgUrl)
@@ -67,12 +68,13 @@ function New-Page {
 
   if ($cfg.mode -eq 'youtube') {
     $id = $cfg.video_id.Trim()
-    $u  = "https://www.youtube-nocookie.com/embed/$id" +
+    # === CORRECCIÓN Error 153 ===
+    $u  = "https://www.youtube.com/embed/$id" +
           "?autoplay=1&loop=1&playlist=$id&controls=0&modestbranding=1" +
-          "&rel=0&iv_load_policy=3&disablekb=1&fs=0&playsinline=1"
-    $cuerpo = "<iframe id='m' src='$u' allow='autoplay; fullscreen'></iframe>"
+          "&rel=0&fs=0&playsinline=1"
+    $cuerpo = "<iframe id='m' src='$u' allow='autoplay; fullscreen' allowfullscreen></iframe>"
   } elseif ($cfg.mode -eq 'page') {
-    $cuerpo = "<iframe id='m' src='$($items[0])' allow='autoplay; fullscreen'></iframe>"
+    $cuerpo = "<iframe id='m' src='$($items[0])' allow='autoplay; fullscreen' allowfullscreen></iframe>"
   } elseif ($esVideo) {
     $cuerpo = "<video id='m' src='$($items[0])' autoplay loop playsinline></video>"
   } else {
@@ -80,8 +82,6 @@ function New-Page {
   }
   $lista = ($items | ForEach-Object { "'$_'" }) -join ','
 
-  # ojo: el iframe lleva pointer-events:none -> nunca roba el foco,
-  # asi que TODAS las teclas las recibe esta pagina (padre).
   $html = @"
 <!doctype html><html><head><meta charset="utf-8"><title>$titulo</title>
 <style>
@@ -105,7 +105,7 @@ $cuerpo
   function matar(){
     if (hecho) return;
     hecho = true;
-    document.title = 'STOP';                 // el vigilante lo lee y cierra todo
+    document.title = 'STOP';
   }
   window.addEventListener('keydown', function(e){
     var t = Date.now(), k = e.key;
@@ -159,7 +159,7 @@ Start-Sleep -Seconds 6
 # ---------------- bucle: volumen 100% + resucitar ----------------
 while ($true) {
 
-  [Vol]::Set($volTarget)                        # siempre 100% y sin mute
+  [Vol]::Set($volTarget)
 
   $ventanas = Get-Process -ErrorAction SilentlyContinue |
               Where-Object { $_.MainWindowTitle }
