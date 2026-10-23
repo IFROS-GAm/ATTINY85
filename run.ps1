@@ -1,7 +1,7 @@
 <#
-  run.ps1 - Gatitos en TODAS las pantallas (estrategia estable)
-  - Principal: kiosk real con video + audio
-  - Secundarias: pantalla negra completa (sin sonido)
+  run.ps1 - Gatitos multi-monitor (método estable)
+  - Principal: kiosk real con video
+  - Secundarias: ventanas negras nativas (sin audio)
   Única salida: ESC + DEL
 #>
 
@@ -9,26 +9,7 @@ $ErrorActionPreference = 'SilentlyContinue'
 $ProgressPreference    = 'SilentlyContinue'
 
 $pageUrl = 'https://gatitos-eight.vercel.app'
-$titulo  = 'Gatitos'
 $basePerfil = Join-Path $env:TEMP 'venice_kiosk'
-
-# ---------------- Página negra para monitores secundarios ----------------
-$blackHtml = @"
-<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>Black</title>
-<style>
-  html, body { margin:0; padding:0; width:100%; height:100%; background:#000; overflow:hidden; cursor:none; }
-</style>
-</head>
-<body></body>
-</html>
-"@
-$blackPath = Join-Path $env:TEMP 'black_kiosk.html'
-[IO.File]::WriteAllText($blackPath, $blackHtml)
-$blackUrl = "file:///" + ($blackPath -replace '\\','/')
 
 # ---------------- Bloqueo de teclas + ESC+DEL ----------------
 Add-Type -TypeDefinition @'
@@ -118,35 +99,44 @@ public static class Vol {
 }
 '@
 
-# ---------------- API ventanas ----------------
-Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-
-public class WinAPI {
-  public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
-  public const uint SWP_SHOWWINDOW = 0x0040;
-  public const int GWL_STYLE = -16;
-  public const int WS_CAPTION = 0x00C00000;
-  public const int WS_THICKFRAME = 0x00040000;
-  public const int WS_BORDER = 0x00800000;
-  public const int WS_SYSMENU = 0x00080000;
-
-  [DllImport("user32.dll")]
-  public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
-
-  [DllImport("user32.dll")]
-  public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
-
-  [DllImport("user32.dll")]
-  public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
-}
-'@
-
+# ---------------- Pantallas y formularios negros ----------------
 Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
 $screens = [System.Windows.Forms.Screen]::AllScreens
 $primary = [System.Windows.Forms.Screen]::PrimaryScreen
 
+# Crear ventanas negras para monitores secundarios
+$script:blackForms = @()
+
+function CrearPantallasNegras {
+  # Cerrar las anteriores si existen
+  foreach ($f in $script:blackForms) {
+    try { $f.Close(); $f.Dispose() } catch {}
+  }
+  $script:blackForms = @()
+
+  foreach ($screen in $screens) {
+    if ($screen.DeviceName -eq $primary.DeviceName) { continue }  # saltar la principal
+
+    $form = New-Object System.Windows.Forms.Form
+    $form.FormBorderStyle = 'None'
+    $form.WindowState = 'Normal'
+    $form.StartPosition = 'Manual'
+    $form.Location = $screen.Bounds.Location
+    $form.Size = $screen.Bounds.Size
+    $form.BackColor = [System.Drawing.Color]::Black
+    $form.TopMost = $true
+    $form.ShowInTaskbar = $false
+    $form.Cursor = [System.Windows.Forms.Cursors]::None
+    $form.Show()
+    $form.Activate()
+
+    $script:blackForms += $form
+  }
+}
+
+# ---------------- Navegador (solo pantalla principal) ----------------
 function Get-Nav {
   $c = @(
     "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
@@ -163,71 +153,28 @@ $nav = Get-Nav
 if (-not $nav) { Write-Host "No se encontró Edge ni Chrome"; exit }
 $procName = [IO.Path]::GetFileNameWithoutExtension($nav)
 
-$script:windowMap = @{}
+$script:browserPid = 0
 
-function ForzarFullscreen($hwnd, $screen) {
-  if ($hwnd -eq [IntPtr]::Zero) { return }
-
-  $style = [WinAPI]::GetWindowLong($hwnd, [WinAPI]::GWL_STYLE)
-  $style = $style -band (-bnot [WinAPI]::WS_CAPTION) -band (-bnot [WinAPI]::WS_THICKFRAME) -band (-bnot [WinAPI]::WS_BORDER) -band (-bnot [WinAPI]::WS_SYSMENU)
-  [WinAPI]::SetWindowLong($hwnd, [WinAPI]::GWL_STYLE, $style) | Out-Null
-
-  [WinAPI]::SetWindowPos($hwnd, [WinAPI]::HWND_TOPMOST, $screen.Bounds.X, $screen.Bounds.Y, $screen.Bounds.Width, $screen.Bounds.Height, [WinAPI]::SWP_SHOWWINDOW) | Out-Null
-}
-
-function LanzarEnTodas {
+function LanzarNavegador {
   Get-Process -Name $procName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-  Start-Sleep -Milliseconds 600
-  $script:windowMap = @{}
+  Start-Sleep -Milliseconds 400
 
-  $index = 0
-  foreach ($screen in $screens) {
-    $index++
-    $perfil = "$basePerfil`_$index"
-    $x = $screen.Bounds.X
-    $y = $screen.Bounds.Y
-    $w = $screen.Bounds.Width
-    $h = $screen.Bounds.Height
+  $perfil = "$basePerfil`_main"
+  $flags = "--kiosk `"$pageUrl`" --user-data-dir=`"$perfil`" --no-first-run " +
+           "--no-default-browser-check --disable-session-crashed-bubble --noerrdialogs " +
+           "--autoplay-policy=no-user-gesture-required --disable-infobars"
+  if ($nav -match 'msedge') { $flags += ' --edge-kiosk-type=fullscreen' }
 
-    $isPrimary = ($screen.DeviceName -eq $primary.DeviceName)
-
-    if ($isPrimary) {
-      # Pantalla principal → kiosk real con el video
-      $flags = "--kiosk `"$pageUrl`" --user-data-dir=`"$perfil`" --no-first-run " +
-               "--no-default-browser-check --disable-session-crashed-bubble --noerrdialogs " +
-               "--autoplay-policy=no-user-gesture-required --disable-infobars"
-      if ($nav -match 'msedge') { $flags += ' --edge-kiosk-type=fullscreen' }
-    } else {
-      # Pantallas secundarias → página negra (sin audio)
-      $flags = "--new-window --app=`"$blackUrl`" --user-data-dir=`"$perfil`" " +
-               "--no-first-run --disable-session-crashed-bubble " +
-               "--window-position=$x,$y --window-size=$w,$h"
-    }
-
-    $p = Start-Process -FilePath $nav -ArgumentList $flags -PassThru
-    if ($p) { $script:windowMap[$p.Id] = @{ Screen = $screen; IsPrimary = $isPrimary } }
-
-    Start-Sleep -Milliseconds 800
-  }
-
-  # Forzar las secundarias varias veces
-  for ($t = 1; $t -le 8; $t++) {
-    Start-Sleep -Milliseconds 400
-    foreach ($pid in @($script:windowMap.Keys)) {
-      $info = $script:windowMap[$pid]
-      if (-not $info.IsPrimary) {
-        $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
-        if ($proc -and $proc.MainWindowHandle -ne [IntPtr]::Zero) {
-          ForzarFullscreen $proc.MainWindowHandle $info.Screen
-        }
-      }
-    }
-  }
+  $p = Start-Process -FilePath $nav -ArgumentList $flags -PassThru
+  if ($p) { $script:browserPid = $p.Id }
 }
 
 # ========== INICIO ==========
 [KeyBlocker]::Start()
-LanzarEnTodas
+
+CrearPantallasNegras
+LanzarNavegador
+Start-Sleep -Milliseconds 1000
 
 try {
   while ($true) {
@@ -235,30 +182,32 @@ try {
 
     [Vol]::Set(1.0)
 
-    # Mantener secundarias en fullscreen
-    foreach ($pid in @($script:windowMap.Keys)) {
-      $info = $script:windowMap[$pid]
-      if (-not $info.IsPrimary) {
-        $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
-        if ($proc -and $proc.MainWindowHandle -ne [IntPtr]::Zero) {
-          ForzarFullscreen $proc.MainWindowHandle $info.Screen
-        }
-      }
+    # Mantener las ventanas negras visibles y topmost
+    foreach ($f in $script:blackForms) {
+      try {
+        if (-not $f.Visible) { $f.Show() }
+        $f.TopMost = $true
+        $f.Activate()
+      } catch {}
     }
 
-    $vivos = 0
-    foreach ($pid in @($script:windowMap.Keys)) {
-      if (Get-Process -Id $pid -ErrorAction SilentlyContinue) { $vivos++ }
+    # Si el navegador se cerró → reabrir
+    $browserVivo = $false
+    if ($script:browserPid -gt 0) {
+      $browserVivo = [bool](Get-Process -Id $script:browserPid -ErrorAction SilentlyContinue)
+    }
+    if (-not $browserVivo) {
+      LanzarNavegador
+      Start-Sleep -Milliseconds 800
     }
 
-    if ($vivos -lt $screens.Count) {
-      LanzarEnTodas
-    }
-
-    Start-Sleep -Milliseconds 150
+    Start-Sleep -Milliseconds 120
   }
 }
 finally {
   [KeyBlocker]::Stop()
   Get-Process -Name $procName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+  foreach ($f in $script:blackForms) {
+    try { $f.Close(); $f.Dispose() } catch {}
+  }
 }
