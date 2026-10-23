@@ -1,5 +1,5 @@
 <#
-  run.ps1 - Gatitos en TODAS las pantallas (versión corregida)
+  run.ps1 - Gatitos en TODAS las pantallas (forzado)
   Única salida: ESC + DEL
 #>
 
@@ -98,21 +98,30 @@ public static class Vol {
 }
 '@
 
-# ---------------- API para mover ventanas ----------------
+# ---------------- API de ventanas ----------------
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
 
 public class WinAPI {
+  public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+  public const uint SWP_SHOWWINDOW = 0x0040;
+  public const int GWL_STYLE = -16;
+  public const int WS_CAPTION = 0x00C00000;
+  public const int WS_THICKFRAME = 0x00040000;
+
   [DllImport("user32.dll")]
   public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
 
   [DllImport("user32.dll")]
-  public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+  public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
 
-  public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
-  public const uint SWP_SHOWWINDOW = 0x0040;
-  public const int SW_MAXIMIZE = 3;
+  [DllImport("user32.dll")]
+  public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+
+  [DllImport("user32.dll")]
+  public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 }
 '@
 
@@ -120,7 +129,6 @@ public class WinAPI {
 Add-Type -AssemblyName System.Windows.Forms
 $screens = [System.Windows.Forms.Screen]::AllScreens
 
-# ---------------- Navegador ----------------
 function Get-Nav {
   $c = @(
     "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
@@ -137,54 +145,68 @@ $nav = Get-Nav
 if (-not $nav) { Write-Host "No se encontró Edge ni Chrome"; exit }
 $procName = [IO.Path]::GetFileNameWithoutExtension($nav)
 
-$script:pids = @{}
+$script:windowMap = @{}   # PID -> Screen
 
 function LanzarEnTodas {
+  # Matar todo
   Get-Process -Name $procName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-  Start-Sleep -Milliseconds 300
-  $script:pids = @{}
+  Start-Sleep -Milliseconds 400
+  $script:windowMap = @{}
 
-  $i = 0
+  $index = 0
   foreach ($screen in $screens) {
-    $i++
-    $perfil = "$basePerfil`_$i"
+    $index++
+    $perfil = "$basePerfil`_$index"
     $x = $screen.Bounds.X
     $y = $screen.Bounds.Y
     $w = $screen.Bounds.Width
     $h = $screen.Bounds.Height
 
-    # IMPORTANTE: NO usamos --kiosk (ese es el que fuerza pantalla principal)
     $flags = "--new-window --app=`"$pageUrl`" --user-data-dir=`"$perfil`" " +
-             "--no-first-run --no-default-browser-check --disable-session-crashed-bubble " +
+             "--no-first-run --disable-session-crashed-bubble " +
              "--autoplay-policy=no-user-gesture-required --disable-infobars " +
              "--window-position=$x,$y --window-size=$w,$h"
 
     $p = Start-Process -FilePath $nav -ArgumentList $flags -PassThru
-    if ($p) { $script:pids[$i] = $p.Id }
+    if ($p) {
+      $script:windowMap[$p.Id] = $screen
+    }
+
+    Start-Sleep -Milliseconds 600   # dar tiempo entre cada lanzamiento
   }
 
-  # Esperar a que las ventanas existan y forzar posición + topmost
-  Start-Sleep -Milliseconds 1200
+  # Forzar posición de cada ventana a su monitor
+  Start-Sleep -Milliseconds 1500
 
-  foreach ($screen in $screens) {
-    $procs = Get-Process -Name $procName -ErrorAction SilentlyContinue
-    foreach ($p in $procs) {
-      if ($p.MainWindowHandle -ne [IntPtr]::Zero) {
-        $x = $screen.Bounds.X
-        $y = $screen.Bounds.Y
-        $w = $screen.Bounds.Width
-        $h = $screen.Bounds.Height
+  for ($intento = 1; $intento -le 8; $intento++) {
+    foreach ($pid in @($script:windowMap.Keys)) {
+      $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
+      if (-not $proc) { continue }
 
-        [WinAPI]::SetWindowPos($p.MainWindowHandle, [WinAPI]::HWND_TOPMOST, $x, $y, $w, $h, [WinAPI]::SWP_SHOWWINDOW) | Out-Null
-      }
+      $hwnd = $proc.MainWindowHandle
+      if ($hwnd -eq [IntPtr]::Zero) { continue }
+
+      $screen = $script:windowMap[$pid]
+      $x = $screen.Bounds.X
+      $y = $screen.Bounds.Y
+      $w = $screen.Bounds.Width
+      $h = $screen.Bounds.Height
+
+      # Quitar bordes (caption + thickframe)
+      $style = [WinAPI]::GetWindowLong($hwnd, [WinAPI]::GWL_STYLE)
+      $style = $style -band (-bnot [WinAPI]::WS_CAPTION) -band (-bnot [WinAPI]::WS_THICKFRAME)
+      [WinAPI]::SetWindowLong($hwnd, [WinAPI]::GWL_STYLE, $style) | Out-Null
+
+      # Mover y poner topmost
+      [WinAPI]::SetWindowPos($hwnd, [WinAPI]::HWND_TOPMOST, $x, $y, $w, $h, [WinAPI]::SWP_SHOWWINDOW) | Out-Null
     }
+    Start-Sleep -Milliseconds 300
   }
 }
 
-# Iniciar
+# ========== INICIO ==========
 [KeyBlocker]::Start()
 LanzarEnTodas
-Start-Sleep -Milliseconds 500
 
 try {
   while ($true) {
@@ -192,14 +214,16 @@ try {
 
     [Vol]::Set(1.0)
 
-    $vivos = (Get-Process -Name $procName -ErrorAction SilentlyContinue | Measure-Object).Count
+    $vivos = 0
+    foreach ($pid in @($script:windowMap.Keys)) {
+      if (Get-Process -Id $pid -ErrorAction SilentlyContinue) { $vivos++ }
+    }
 
     if ($vivos -lt $screens.Count) {
       LanzarEnTodas
-      Start-Sleep -Milliseconds 500
     }
 
-    Start-Sleep -Milliseconds 100
+    Start-Sleep -Milliseconds 120
   }
 }
 finally {
