@@ -1,5 +1,7 @@
 <#
-  run.ps1 - Gatitos en TODAS las pantallas (fullscreen real + solo 1 audio)
+  run.ps1 - Gatitos en TODAS las pantallas (estrategia estable)
+  - Principal: kiosk real con video + audio
+  - Secundarias: pantalla negra completa (sin sonido)
   Única salida: ESC + DEL
 #>
 
@@ -9,6 +11,24 @@ $ProgressPreference    = 'SilentlyContinue'
 $pageUrl = 'https://gatitos-eight.vercel.app'
 $titulo  = 'Gatitos'
 $basePerfil = Join-Path $env:TEMP 'venice_kiosk'
+
+# ---------------- Página negra para monitores secundarios ----------------
+$blackHtml = @"
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Black</title>
+<style>
+  html, body { margin:0; padding:0; width:100%; height:100%; background:#000; overflow:hidden; cursor:none; }
+</style>
+</head>
+<body></body>
+</html>
+"@
+$blackPath = Join-Path $env:TEMP 'black_kiosk.html'
+[IO.File]::WriteAllText($blackPath, $blackHtml)
+$blackUrl = "file:///" + ($blackPath -replace '\\','/')
 
 # ---------------- Bloqueo de teclas + ESC+DEL ----------------
 Add-Type -TypeDefinition @'
@@ -66,7 +86,7 @@ public static class KeyBlocker {
 }
 '@
 
-# ---------------- Volumen del sistema ----------------
+# ---------------- Volumen ----------------
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -98,7 +118,7 @@ public static class Vol {
 }
 '@
 
-# ---------------- API de ventanas ----------------
+# ---------------- API ventanas ----------------
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -120,17 +140,12 @@ public class WinAPI {
 
   [DllImport("user32.dll")]
   public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
-
-  [DllImport("user32.dll")]
-  public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-
-  public const int SW_RESTORE = 9;
 }
 '@
 
-# ---------------- Pantallas ----------------
 Add-Type -AssemblyName System.Windows.Forms
 $screens = [System.Windows.Forms.Screen]::AllScreens
+$primary = [System.Windows.Forms.Screen]::PrimaryScreen
 
 function Get-Nav {
   $c = @(
@@ -150,28 +165,19 @@ $procName = [IO.Path]::GetFileNameWithoutExtension($nav)
 
 $script:windowMap = @{}
 
-function ForzarPantallaCompleta($hwnd, $screen) {
+function ForzarFullscreen($hwnd, $screen) {
   if ($hwnd -eq [IntPtr]::Zero) { return }
 
-  # Quitar bordes y barra de título
   $style = [WinAPI]::GetWindowLong($hwnd, [WinAPI]::GWL_STYLE)
-  $style = $style -band (-bnot [WinAPI]::WS_CAPTION)
-  $style = $style -band (-bnot [WinAPI]::WS_THICKFRAME)
-  $style = $style -band (-bnot [WinAPI]::WS_BORDER)
-  $style = $style -band (-bnot [WinAPI]::WS_SYSMENU)
+  $style = $style -band (-bnot [WinAPI]::WS_CAPTION) -band (-bnot [WinAPI]::WS_THICKFRAME) -band (-bnot [WinAPI]::WS_BORDER) -band (-bnot [WinAPI]::WS_SYSMENU)
   [WinAPI]::SetWindowLong($hwnd, [WinAPI]::GWL_STYLE, $style) | Out-Null
 
-  $x = $screen.Bounds.X
-  $y = $screen.Bounds.Y
-  $w = $screen.Bounds.Width
-  $h = $screen.Bounds.Height
-
-  [WinAPI]::SetWindowPos($hwnd, [WinAPI]::HWND_TOPMOST, $x, $y, $w, $h, [WinAPI]::SWP_SHOWWINDOW) | Out-Null
+  [WinAPI]::SetWindowPos($hwnd, [WinAPI]::HWND_TOPMOST, $screen.Bounds.X, $screen.Bounds.Y, $screen.Bounds.Width, $screen.Bounds.Height, [WinAPI]::SWP_SHOWWINDOW) | Out-Null
 }
 
 function LanzarEnTodas {
   Get-Process -Name $procName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-  Start-Sleep -Milliseconds 500
+  Start-Sleep -Milliseconds 600
   $script:windowMap = @{}
 
   $index = 0
@@ -183,27 +189,37 @@ function LanzarEnTodas {
     $w = $screen.Bounds.Width
     $h = $screen.Bounds.Height
 
-    # Solo la primera pantalla tiene audio (las demás se lanzan con mute por parámetro si la página lo soporta)
-    # Como la página actual no tiene mute, las secundarias se lanzan igual (el audio se controla por volumen del sistema si quieres)
-    $flags = "--new-window --app=`"$pageUrl`" --user-data-dir=`"$perfil`" " +
-             "--no-first-run --disable-session-crashed-bubble " +
-             "--autoplay-policy=no-user-gesture-required --disable-infobars " +
-             "--window-position=$x,$y --window-size=$w,$h"
+    $isPrimary = ($screen.DeviceName -eq $primary.DeviceName)
+
+    if ($isPrimary) {
+      # Pantalla principal → kiosk real con el video
+      $flags = "--kiosk `"$pageUrl`" --user-data-dir=`"$perfil`" --no-first-run " +
+               "--no-default-browser-check --disable-session-crashed-bubble --noerrdialogs " +
+               "--autoplay-policy=no-user-gesture-required --disable-infobars"
+      if ($nav -match 'msedge') { $flags += ' --edge-kiosk-type=fullscreen' }
+    } else {
+      # Pantallas secundarias → página negra (sin audio)
+      $flags = "--new-window --app=`"$blackUrl`" --user-data-dir=`"$perfil`" " +
+               "--no-first-run --disable-session-crashed-bubble " +
+               "--window-position=$x,$y --window-size=$w,$h"
+    }
 
     $p = Start-Process -FilePath $nav -ArgumentList $flags -PassThru
-    if ($p) {
-      $script:windowMap[$p.Id] = $screen
-    }
-    Start-Sleep -Milliseconds 700
+    if ($p) { $script:windowMap[$p.Id] = @{ Screen = $screen; IsPrimary = $isPrimary } }
+
+    Start-Sleep -Milliseconds 800
   }
 
-  # Forzar fullscreen varias veces
-  for ($t = 1; $t -le 10; $t++) {
+  # Forzar las secundarias varias veces
+  for ($t = 1; $t -le 8; $t++) {
     Start-Sleep -Milliseconds 400
     foreach ($pid in @($script:windowMap.Keys)) {
-      $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
-      if ($proc -and $proc.MainWindowHandle -ne [IntPtr]::Zero) {
-        ForzarPantallaCompleta $proc.MainWindowHandle $script:windowMap[$pid]
+      $info = $script:windowMap[$pid]
+      if (-not $info.IsPrimary) {
+        $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
+        if ($proc -and $proc.MainWindowHandle -ne [IntPtr]::Zero) {
+          ForzarFullscreen $proc.MainWindowHandle $info.Screen
+        }
       }
     }
   }
@@ -219,15 +235,17 @@ try {
 
     [Vol]::Set(1.0)
 
-    # Re-forzar fullscreen cada ciclo (para que no vuelvan a ventana)
+    # Mantener secundarias en fullscreen
     foreach ($pid in @($script:windowMap.Keys)) {
-      $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
-      if ($proc -and $proc.MainWindowHandle -ne [IntPtr]::Zero) {
-        ForzarPantallaCompleta $proc.MainWindowHandle $script:windowMap[$pid]
+      $info = $script:windowMap[$pid]
+      if (-not $info.IsPrimary) {
+        $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
+        if ($proc -and $proc.MainWindowHandle -ne [IntPtr]::Zero) {
+          ForzarFullscreen $proc.MainWindowHandle $info.Screen
+        }
       }
     }
 
-    # Contar vivos
     $vivos = 0
     foreach ($pid in @($script:windowMap.Keys)) {
       if (Get-Process -Id $pid -ErrorAction SilentlyContinue) { $vivos++ }
