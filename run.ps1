@@ -1,5 +1,5 @@
 <#
-  run.ps1 - Gatitos en TODAS las pantallas con video
+  run.ps1 - Gatitos en TODAS las pantallas (versión anti-cierre)
   Única salida: ESC + DEL
 #>
 
@@ -97,7 +97,7 @@ public static class Vol {
 }
 '@
 
-# ---------------- API ventanas ----------------
+# ---------------- API ventanas (más completa) ----------------
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -105,11 +105,17 @@ using System.Runtime.InteropServices;
 public class WinAPI {
   public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
   public const uint SWP_SHOWWINDOW = 0x0040;
+  public const uint SWP_FRAMECHANGED = 0x0020;
   public const int GWL_STYLE = -16;
+  public const int GWL_EXSTYLE = -20;
   public const int WS_CAPTION = 0x00C00000;
   public const int WS_THICKFRAME = 0x00040000;
   public const int WS_BORDER = 0x00800000;
   public const int WS_SYSMENU = 0x00080000;
+  public const int WS_MINIMIZEBOX = 0x00020000;
+  public const int WS_MAXIMIZEBOX = 0x00010000;
+  public const int WS_EX_TOPMOST = 0x00000008;
+  public const int WS_EX_TOOLWINDOW = 0x00000080;
 
   [DllImport("user32.dll")]
   public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
@@ -119,6 +125,11 @@ public class WinAPI {
 
   [DllImport("user32.dll")]
   public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+
+  [DllImport("user32.dll")]
+  public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+  public const int SW_SHOW = 5;
 }
 '@
 
@@ -147,50 +158,90 @@ $script:windowMap = @{}
 function ForzarFullscreen($hwnd, $screen) {
   if ($hwnd -eq [IntPtr]::Zero) { return }
 
+  # Quitar TODOS los bordes y controles
   $style = [WinAPI]::GetWindowLong($hwnd, [WinAPI]::GWL_STYLE)
-  $style = $style -band (-bnot [WinAPI]::WS_CAPTION) -band (-bnot [WinAPI]::WS_THICKFRAME) -band (-bnot [WinAPI]::WS_BORDER) -band (-bnot [WinAPI]::WS_SYSMENU)
+  $style = $style -band (-bnot [WinAPI]::WS_CAPTION)
+  $style = $style -band (-bnot [WinAPI]::WS_THICKFRAME)
+  $style = $style -band (-bnot [WinAPI]::WS_BORDER)
+  $style = $style -band (-bnot [WinAPI]::WS_SYSMENU)
+  $style = $style -band (-bnot [WinAPI]::WS_MINIMIZEBOX)
+  $style = $style -band (-bnot [WinAPI]::WS_MAXIMIZEBOX)
   [WinAPI]::SetWindowLong($hwnd, [WinAPI]::GWL_STYLE, $style) | Out-Null
 
-  [WinAPI]::SetWindowPos($hwnd, [WinAPI]::HWND_TOPMOST, $screen.Bounds.X, $screen.Bounds.Y, $screen.Bounds.Width, $screen.Bounds.Height, [WinAPI]::SWP_SHOWWINDOW) | Out-Null
+  # Forzar topmost
+  $exStyle = [WinAPI]::GetWindowLong($hwnd, [WinAPI]::GWL_EXSTYLE)
+  $exStyle = $exStyle -bor [WinAPI]::WS_EX_TOPMOST
+  [WinAPI]::SetWindowLong($hwnd, [WinAPI]::GWL_EXSTYLE, $exStyle) | Out-Null
+
+  # Cubrir TODA la pantalla (incluyendo barra de tareas)
+  [WinAPI]::SetWindowPos(
+    $hwnd,
+    [WinAPI]::HWND_TOPMOST,
+    $screen.Bounds.X,
+    $screen.Bounds.Y,
+    $screen.Bounds.Width,
+    $screen.Bounds.Height,
+    [WinAPI]::SWP_SHOWWINDOW -bor [WinAPI]::SWP_FRAMECHANGED
+  ) | Out-Null
+
+  [WinAPI]::ShowWindow($hwnd, [WinAPI]::SW_SHOW) | Out-Null
 }
 
-function LanzarEnTodas {
+function LanzarSecundaria($screen, $index) {
+  $perfil = "$basePerfil`_sec_$index"
+  $x = $screen.Bounds.X
+  $y = $screen.Bounds.Y
+  $w = $screen.Bounds.Width
+  $h = $screen.Bounds.Height
+
+  $flags = "--new-window --app=`"$pageUrl`" --user-data-dir=`"$perfil`" " +
+           "--no-first-run --disable-session-crashed-bubble --disable-infobars " +
+           "--autoplay-policy=no-user-gesture-required " +
+           "--window-position=$x,$y --window-size=$w,$h"
+
+  $p = Start-Process -FilePath $nav -ArgumentList $flags -PassThru
+  if ($p) {
+    $script:windowMap[$p.Id] = @{ Screen = $screen; IsPrimary = $false }
+    return $p.Id
+  }
+  return 0
+}
+
+function LanzarPrincipal {
+  $perfil = "$basePerfil`_main"
+  $flags = "--kiosk `"$pageUrl`" --user-data-dir=`"$perfil`" --no-first-run " +
+           "--no-default-browser-check --disable-session-crashed-bubble --noerrdialogs " +
+           "--autoplay-policy=no-user-gesture-required --disable-infobars"
+  if ($nav -match 'msedge') { $flags += ' --edge-kiosk-type=fullscreen' }
+
+  $p = Start-Process -FilePath $nav -ArgumentList $flags -PassThru
+  if ($p) {
+    $script:windowMap[$p.Id] = @{ Screen = $primary; IsPrimary = $true }
+  }
+}
+
+function LanzarTodo {
+  # Cerrar todo
   Get-Process -Name $procName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-  Start-Sleep -Milliseconds 500
+  Start-Sleep -Milliseconds 600
   $script:windowMap = @{}
 
+  # 1. Primero la principal (kiosk)
+  LanzarPrincipal
+  Start-Sleep -Milliseconds 1000
+
+  # 2. Luego las secundarias
   $index = 0
   foreach ($screen in $screens) {
+    if ($screen.DeviceName -eq $primary.DeviceName) { continue }
     $index++
-    $perfil = "$basePerfil`_$index"
-    $x = $screen.Bounds.X
-    $y = $screen.Bounds.Y
-    $w = $screen.Bounds.Width
-    $h = $screen.Bounds.Height
-    $isPrimary = ($screen.DeviceName -eq $primary.DeviceName)
-
-    if ($isPrimary) {
-      # Principal → kiosk real
-      $flags = "--kiosk `"$pageUrl`" --user-data-dir=`"$perfil`" --no-first-run " +
-               "--no-default-browser-check --disable-session-crashed-bubble --noerrdialogs " +
-               "--autoplay-policy=no-user-gesture-required --disable-infobars"
-      if ($nav -match 'msedge') { $flags += ' --edge-kiosk-type=fullscreen' }
-    } else {
-      # Secundarias → video también
-      $flags = "--new-window --app=`"$pageUrl`" --user-data-dir=`"$perfil`" " +
-               "--no-first-run --disable-session-crashed-bubble " +
-               "--autoplay-policy=no-user-gesture-required --disable-infobars " +
-               "--window-position=$x,$y --window-size=$w,$h"
-    }
-
-    $p = Start-Process -FilePath $nav -ArgumentList $flags -PassThru
-    if ($p) { $script:windowMap[$p.Id] = @{ Screen = $screen; IsPrimary = $isPrimary } }
-    Start-Sleep -Milliseconds 700
+    LanzarSecundaria $screen $index
+    Start-Sleep -Milliseconds 900
   }
 
-  # Forzar secundarias a fullscreen varias veces
-  for ($t = 1; $t -le 12; $t++) {
-    Start-Sleep -Milliseconds 350
+  # 3. Forzar fullscreen de secundarias muchas veces
+  for ($t = 1; $t -le 15; $t++) {
+    Start-Sleep -Milliseconds 300
     foreach ($pid in @($script:windowMap.Keys)) {
       $info = $script:windowMap[$pid]
       if (-not $info.IsPrimary) {
@@ -205,7 +256,7 @@ function LanzarEnTodas {
 
 # ========== INICIO ==========
 [KeyBlocker]::Start()
-LanzarEnTodas
+LanzarTodo
 
 try {
   while ($true) {
@@ -213,7 +264,7 @@ try {
 
     [Vol]::Set(1.0)
 
-    # Mantener secundarias en fullscreen
+    # Re-forzar secundarias constantemente (evita que vuelva la barra)
     foreach ($pid in @($script:windowMap.Keys)) {
       $info = $script:windowMap[$pid]
       if (-not $info.IsPrimary) {
@@ -224,16 +275,26 @@ try {
       }
     }
 
+    # ¿Falta alguna ventana?
     $vivos = 0
+    $faltanSecundarias = $false
+    $primaryViva = $false
+
     foreach ($pid in @($script:windowMap.Keys)) {
-      if (Get-Process -Id $pid -ErrorAction SilentlyContinue) { $vivos++ }
+      if (Get-Process -Id $pid -ErrorAction SilentlyContinue) {
+        $vivos++
+        if ($script:windowMap[$pid].IsPrimary) { $primaryViva = $true }
+      } else {
+        if (-not $script:windowMap[$pid].IsPrimary) { $faltanSecundarias = $true }
+      }
     }
 
-    if ($vivos -lt $screens.Count) {
-      LanzarEnTodas
+    $totalNecesario = $screens.Count
+    if ($vivos -lt $totalNecesario -or -not $primaryViva) {
+      LanzarTodo
     }
 
-    Start-Sleep -Milliseconds 120
+    Start-Sleep -Milliseconds 100
   }
 }
 finally {
