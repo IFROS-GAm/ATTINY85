@@ -199,10 +199,16 @@ function LanzarNavegador {
   Start-Sleep -Milliseconds 400
 
   $perfil = "$basePerfil`_main"
+
   $flags = "--kiosk `"$pageUrl`" --user-data-dir=`"$perfil`" --no-first-run " +
            "--no-default-browser-check --disable-session-crashed-bubble --noerrdialogs " +
-           "--autoplay-policy=no-user-gesture-required --disable-infobars"
-  if ($nav -match 'msedge') { $flags += ' --edge-kiosk-type=fullscreen' }
+           "--autoplay-policy=no-user-gesture-required --disable-infobars " +
+           "--disable-notifications --disable-popup-blocking " +
+           "--disable-features=PictureInPicture,MediaSession,MediaSessionService,GlobalMediaControls,Translate,msEdgeWelcomePage,EdgeCollections,msEdgeSidebarV2,msHubApps,EdgePictureInPicture,msEdgeImageSuperResolution,msEdgeEnhanceImages,OverlayScrollbar"
+
+  if ($nav -match 'msedge') {
+    $flags += ' --edge-kiosk-type=fullscreen'
+  }
 
   $p = Start-Process -FilePath $nav -ArgumentList $flags -PassThru
   if ($p) { $script:browserPid = $p.Id }
