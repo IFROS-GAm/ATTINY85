@@ -1,6 +1,6 @@
 <#
-  run.ps1 - Principal: video | Secundarias: 1 imagen al azar (sin mouse)
-  Única salida: ESC + DEL
+  run.ps1 - Principal: video | Secundarias: imagen al azar
+  Edge prioritario | Única salida: ESC + DEL
 #>
 
 $ErrorActionPreference = 'SilentlyContinue'
@@ -14,7 +14,7 @@ $imagenesUrl = @(
 $basePerfil      = Join-Path $env:TEMP 'venice_kiosk'
 $carpetaImagenes = Join-Path $env:TEMP 'kiosk_imgs'
 
-# Descargar las imágenes
+# Descargar imágenes
 if (-not (Test-Path $carpetaImagenes)) { New-Item -ItemType Directory -Path $carpetaImagenes | Out-Null }
 $imagenesLocales = @()
 $i = 0
@@ -27,7 +27,7 @@ foreach ($url in $imagenesUrl) {
   } catch {}
 }
 
-# Elegir UNA imagen al azar para esta ejecución
+# Elegir UNA imagen al azar
 $imagenElegida = $null
 if ($imagenesLocales.Count -gt 0) {
   $imagenElegida = $imagenesLocales | Get-Random
@@ -89,11 +89,10 @@ public static class KeyBlocker {
 }
 '@
 
-# ---------------- Ocultar cursor del sistema ----------------
+# ---------------- Ocultar cursor ----------------
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
-
 public class CursorHelper {
   [DllImport("user32.dll")]
   public static extern int ShowCursor(bool bShow);
@@ -132,7 +131,7 @@ public static class Vol {
 }
 '@
 
-# ---------------- Pantallas con imagen ----------------
+# ---------------- Pantallas secundarias ----------------
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
@@ -176,16 +175,23 @@ function CrearPantallasImagen {
   }
 }
 
-# ---------------- Navegador (solo principal) ----------------
+# ---------------- Navegador (Edge prioritario) ----------------
 function Get-Nav {
-  $c = @(
+  # 1. Edge primero
+  $edge = @(
     "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
-    "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe",
+    "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
+  )
+  foreach ($p in $edge) { if (Test-Path $p) { return $p } }
+
+  # 2. Chrome por si acaso
+  $chrome = @(
     "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
     "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
     "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe"
   )
-  foreach ($p in $c) { if (Test-Path $p) { return $p } }
+  foreach ($p in $chrome) { if (Test-Path $p) { return $p } }
+
   return $null
 }
 
@@ -204,10 +210,10 @@ function LanzarNavegador {
            "--no-default-browser-check --disable-session-crashed-bubble --noerrdialogs " +
            "--autoplay-policy=no-user-gesture-required --disable-infobars " +
            "--disable-notifications --disable-popup-blocking " +
-           "--disable-features=PictureInPicture,MediaSession,MediaSessionService,GlobalMediaControls,Translate,msEdgeWelcomePage,EdgeCollections,msEdgeSidebarV2,msHubApps,EdgePictureInPicture,msEdgeImageSuperResolution,msEdgeEnhanceImages,OverlayScrollbar"
+           "--disable-features=PictureInPicture,MediaSession,MediaSessionService,GlobalMediaControls,Translate,OverlayScrollbar"
 
   if ($nav -match 'msedge') {
-    $flags += ' --edge-kiosk-type=fullscreen'
+    $flags += ' --edge-kiosk-type=fullscreen --disable-features=msEdgeEnhanceImages,msEdgeImageSuperResolution,EdgePictureInPicture,msEdgeSidebarV2,msHubApps'
   }
 
   $p = Start-Process -FilePath $nav -ArgumentList $flags -PassThru
@@ -216,8 +222,6 @@ function LanzarNavegador {
 
 # ========== INICIO ==========
 [KeyBlocker]::Start()
-
-# Ocultar cursor del sistema
 [CursorHelper]::ShowCursor($false) | Out-Null
 [System.Windows.Forms.Cursor]::Hide()
 
@@ -230,9 +234,8 @@ try {
     if ([KeyBlocker]::shouldExit) { break }
 
     [Vol]::Set(1.0)
-
-    # Mantener cursor oculto y formularios arriba
     [CursorHelper]::ShowCursor($false) | Out-Null
+
     foreach ($f in $script:imageForms) {
       try {
         if (-not $f.Visible) { $f.Show() }
@@ -241,7 +244,6 @@ try {
       } catch {}
     }
 
-    # Si se cerró el navegador → reabrir
     $vivo = $false
     if ($script:browserPid -gt 0) {
       $vivo = [bool](Get-Process -Id $script:browserPid -ErrorAction SilentlyContinue)
