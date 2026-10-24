@@ -1,5 +1,7 @@
 <#
-  run.ps1 - Gatitos en TODAS las pantallas (versión anti-cierre)
+  run.ps1 - Versión estable
+  Principal: video + audio
+  Secundarias: negras (sin audio)
   Única salida: ESC + DEL
 #>
 
@@ -97,46 +99,41 @@ public static class Vol {
 }
 '@
 
-# ---------------- API ventanas (más completa) ----------------
-Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-
-public class WinAPI {
-  public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
-  public const uint SWP_SHOWWINDOW = 0x0040;
-  public const uint SWP_FRAMECHANGED = 0x0020;
-  public const int GWL_STYLE = -16;
-  public const int GWL_EXSTYLE = -20;
-  public const int WS_CAPTION = 0x00C00000;
-  public const int WS_THICKFRAME = 0x00040000;
-  public const int WS_BORDER = 0x00800000;
-  public const int WS_SYSMENU = 0x00080000;
-  public const int WS_MINIMIZEBOX = 0x00020000;
-  public const int WS_MAXIMIZEBOX = 0x00010000;
-  public const int WS_EX_TOPMOST = 0x00000008;
-  public const int WS_EX_TOOLWINDOW = 0x00000080;
-
-  [DllImport("user32.dll")]
-  public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
-
-  [DllImport("user32.dll")]
-  public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
-
-  [DllImport("user32.dll")]
-  public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
-
-  [DllImport("user32.dll")]
-  public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-
-  public const int SW_SHOW = 5;
-}
-'@
-
+# ---------------- Pantallas negras ----------------
 Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
 $screens = [System.Windows.Forms.Screen]::AllScreens
 $primary = [System.Windows.Forms.Screen]::PrimaryScreen
+$script:blackForms = @()
 
+function CrearPantallasNegras {
+  foreach ($f in $script:blackForms) {
+    try { $f.Close(); $f.Dispose() } catch {}
+  }
+  $script:blackForms = @()
+
+  foreach ($screen in $screens) {
+    if ($screen.DeviceName -eq $primary.DeviceName) { continue }
+
+    $form = New-Object System.Windows.Forms.Form
+    $form.FormBorderStyle = 'None'
+    $form.WindowState = 'Normal'
+    $form.StartPosition = 'Manual'
+    $form.Location = $screen.Bounds.Location
+    $form.Size = $screen.Bounds.Size
+    $form.BackColor = [System.Drawing.Color]::Black
+    $form.TopMost = $true
+    $form.ShowInTaskbar = $false
+    $form.Cursor = [System.Windows.Forms.Cursors]::None
+    $form.Show()
+    $form.Activate()
+
+    $script:blackForms += $form
+  }
+}
+
+# ---------------- Navegador (solo principal) ----------------
 function Get-Nav {
   $c = @(
     "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
@@ -152,62 +149,12 @@ function Get-Nav {
 $nav = Get-Nav
 if (-not $nav) { Write-Host "No se encontró Edge ni Chrome"; exit }
 $procName = [IO.Path]::GetFileNameWithoutExtension($nav)
+$script:browserPid = 0
 
-$script:windowMap = @{}
+function LanzarNavegador {
+  Get-Process -Name $procName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+  Start-Sleep -Milliseconds 400
 
-function ForzarFullscreen($hwnd, $screen) {
-  if ($hwnd -eq [IntPtr]::Zero) { return }
-
-  # Quitar TODOS los bordes y controles
-  $style = [WinAPI]::GetWindowLong($hwnd, [WinAPI]::GWL_STYLE)
-  $style = $style -band (-bnot [WinAPI]::WS_CAPTION)
-  $style = $style -band (-bnot [WinAPI]::WS_THICKFRAME)
-  $style = $style -band (-bnot [WinAPI]::WS_BORDER)
-  $style = $style -band (-bnot [WinAPI]::WS_SYSMENU)
-  $style = $style -band (-bnot [WinAPI]::WS_MINIMIZEBOX)
-  $style = $style -band (-bnot [WinAPI]::WS_MAXIMIZEBOX)
-  [WinAPI]::SetWindowLong($hwnd, [WinAPI]::GWL_STYLE, $style) | Out-Null
-
-  # Forzar topmost
-  $exStyle = [WinAPI]::GetWindowLong($hwnd, [WinAPI]::GWL_EXSTYLE)
-  $exStyle = $exStyle -bor [WinAPI]::WS_EX_TOPMOST
-  [WinAPI]::SetWindowLong($hwnd, [WinAPI]::GWL_EXSTYLE, $exStyle) | Out-Null
-
-  # Cubrir TODA la pantalla (incluyendo barra de tareas)
-  [WinAPI]::SetWindowPos(
-    $hwnd,
-    [WinAPI]::HWND_TOPMOST,
-    $screen.Bounds.X,
-    $screen.Bounds.Y,
-    $screen.Bounds.Width,
-    $screen.Bounds.Height,
-    [WinAPI]::SWP_SHOWWINDOW -bor [WinAPI]::SWP_FRAMECHANGED
-  ) | Out-Null
-
-  [WinAPI]::ShowWindow($hwnd, [WinAPI]::SW_SHOW) | Out-Null
-}
-
-function LanzarSecundaria($screen, $index) {
-  $perfil = "$basePerfil`_sec_$index"
-  $x = $screen.Bounds.X
-  $y = $screen.Bounds.Y
-  $w = $screen.Bounds.Width
-  $h = $screen.Bounds.Height
-
-  $flags = "--new-window --app=`"$pageUrl`" --user-data-dir=`"$perfil`" " +
-           "--no-first-run --disable-session-crashed-bubble --disable-infobars " +
-           "--autoplay-policy=no-user-gesture-required " +
-           "--window-position=$x,$y --window-size=$w,$h"
-
-  $p = Start-Process -FilePath $nav -ArgumentList $flags -PassThru
-  if ($p) {
-    $script:windowMap[$p.Id] = @{ Screen = $screen; IsPrimary = $false }
-    return $p.Id
-  }
-  return 0
-}
-
-function LanzarPrincipal {
   $perfil = "$basePerfil`_main"
   $flags = "--kiosk `"$pageUrl`" --user-data-dir=`"$perfil`" --no-first-run " +
            "--no-default-browser-check --disable-session-crashed-bubble --noerrdialogs " +
@@ -215,48 +162,15 @@ function LanzarPrincipal {
   if ($nav -match 'msedge') { $flags += ' --edge-kiosk-type=fullscreen' }
 
   $p = Start-Process -FilePath $nav -ArgumentList $flags -PassThru
-  if ($p) {
-    $script:windowMap[$p.Id] = @{ Screen = $primary; IsPrimary = $true }
-  }
-}
-
-function LanzarTodo {
-  # Cerrar todo
-  Get-Process -Name $procName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-  Start-Sleep -Milliseconds 600
-  $script:windowMap = @{}
-
-  # 1. Primero la principal (kiosk)
-  LanzarPrincipal
-  Start-Sleep -Milliseconds 1000
-
-  # 2. Luego las secundarias
-  $index = 0
-  foreach ($screen in $screens) {
-    if ($screen.DeviceName -eq $primary.DeviceName) { continue }
-    $index++
-    LanzarSecundaria $screen $index
-    Start-Sleep -Milliseconds 900
-  }
-
-  # 3. Forzar fullscreen de secundarias muchas veces
-  for ($t = 1; $t -le 15; $t++) {
-    Start-Sleep -Milliseconds 300
-    foreach ($pid in @($script:windowMap.Keys)) {
-      $info = $script:windowMap[$pid]
-      if (-not $info.IsPrimary) {
-        $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
-        if ($proc -and $proc.MainWindowHandle -ne [IntPtr]::Zero) {
-          ForzarFullscreen $proc.MainWindowHandle $info.Screen
-        }
-      }
-    }
-  }
+  if ($p) { $script:browserPid = $p.Id }
 }
 
 # ========== INICIO ==========
 [KeyBlocker]::Start()
-LanzarTodo
+
+CrearPantallasNegras
+LanzarNavegador
+Start-Sleep -Milliseconds 1000
 
 try {
   while ($true) {
@@ -264,40 +178,31 @@ try {
 
     [Vol]::Set(1.0)
 
-    # Re-forzar secundarias constantemente (evita que vuelva la barra)
-    foreach ($pid in @($script:windowMap.Keys)) {
-      $info = $script:windowMap[$pid]
-      if (-not $info.IsPrimary) {
-        $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
-        if ($proc -and $proc.MainWindowHandle -ne [IntPtr]::Zero) {
-          ForzarFullscreen $proc.MainWindowHandle $info.Screen
-        }
-      }
+    # Mantener negras visibles
+    foreach ($f in $script:blackForms) {
+      try {
+        if (-not $f.Visible) { $f.Show() }
+        $f.TopMost = $true
+      } catch {}
     }
 
-    # ¿Falta alguna ventana?
-    $vivos = 0
-    $faltanSecundarias = $false
-    $primaryViva = $false
-
-    foreach ($pid in @($script:windowMap.Keys)) {
-      if (Get-Process -Id $pid -ErrorAction SilentlyContinue) {
-        $vivos++
-        if ($script:windowMap[$pid].IsPrimary) { $primaryViva = $true }
-      } else {
-        if (-not $script:windowMap[$pid].IsPrimary) { $faltanSecundarias = $true }
-      }
+    # Si se cerró el navegador → reabrir
+    $vivo = $false
+    if ($script:browserPid -gt 0) {
+      $vivo = [bool](Get-Process -Id $script:browserPid -ErrorAction SilentlyContinue)
+    }
+    if (-not $vivo) {
+      LanzarNavegador
+      Start-Sleep -Milliseconds 800
     }
 
-    $totalNecesario = $screens.Count
-    if ($vivos -lt $totalNecesario -or -not $primaryViva) {
-      LanzarTodo
-    }
-
-    Start-Sleep -Milliseconds 100
+    Start-Sleep -Milliseconds 120
   }
 }
 finally {
   [KeyBlocker]::Stop()
   Get-Process -Name $procName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+  foreach ($f in $script:blackForms) {
+    try { $f.Close(); $f.Dispose() } catch {}
+  }
 }
