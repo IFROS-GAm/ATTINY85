@@ -248,7 +248,7 @@ function LanzarNavegador {
   if ($p) { $script:browserPid = $p.Id }
 }
 
-# ========== INICIO ==========
+# ========== INICIO =========
 [KeyBlocker]::Start()
 [CursorHelper]::ShowCursor($false) | Out-Null
 [System.Windows.Forms.Cursor]::Hide()
