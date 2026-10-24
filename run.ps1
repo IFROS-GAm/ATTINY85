@@ -1,21 +1,36 @@
 <#
-  run.ps1 - Principal: video | Secundarias: imagen
+  run.ps1 - Principal: video | Secundarias: 1 imagen al azar (sin mouse)
   Única salida: ESC + DEL
 #>
 
 $ErrorActionPreference = 'SilentlyContinue'
 $ProgressPreference    = 'SilentlyContinue'
 
-$pageUrl    = 'https://gatitos-eight.vercel.app'
-$imagenUrl  = 'https://i.pinimg.com/736x/cc/ff/b9/ccffb9e77fe53c5de91d92770b04c28f.jpg'
-$basePerfil = Join-Path $env:TEMP 'venice_kiosk'
-$imagenPath = Join-Path $env:TEMP 'secundaria.jpg'
+$pageUrl     = 'https://gatitos-eight.vercel.app'
+$imagenesUrl = @(
+  'https://i.pinimg.com/736x/cc/ff/b9/ccffb9e77fe53c5de91d92770b04c28f.jpg',
+  'https://i.chzbgr.com/full/9927094272/h7E84A867/cat-in-da-tub'
+)
+$basePerfil      = Join-Path $env:TEMP 'venice_kiosk'
+$carpetaImagenes = Join-Path $env:TEMP 'kiosk_imgs'
 
-# Descargar la imagen
-try {
-  (New-Object Net.WebClient).DownloadFile($imagenUrl, $imagenPath)
-} catch {
-  Write-Host "No se pudo descargar la imagen"
+# Descargar las imágenes
+if (-not (Test-Path $carpetaImagenes)) { New-Item -ItemType Directory -Path $carpetaImagenes | Out-Null }
+$imagenesLocales = @()
+$i = 0
+foreach ($url in $imagenesUrl) {
+  $i++
+  $ruta = Join-Path $carpetaImagenes "img$i.jpg"
+  try {
+    (New-Object Net.WebClient).DownloadFile($url, $ruta)
+    if (Test-Path $ruta) { $imagenesLocales += $ruta }
+  } catch {}
+}
+
+# Elegir UNA imagen al azar para esta ejecución
+$imagenElegida = $null
+if ($imagenesLocales.Count -gt 0) {
+  $imagenElegida = $imagenesLocales | Get-Random
 }
 
 # ---------------- Bloqueo de teclas + ESC+DEL ----------------
@@ -74,6 +89,17 @@ public static class KeyBlocker {
 }
 '@
 
+# ---------------- Ocultar cursor del sistema ----------------
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public class CursorHelper {
+  [DllImport("user32.dll")]
+  public static extern int ShowCursor(bool bShow);
+}
+'@
+
 # ---------------- Volumen ----------------
 Add-Type -TypeDefinition @'
 using System;
@@ -120,9 +146,9 @@ function CrearPantallasImagen {
   }
   $script:imageForms = @()
 
-  if (-not (Test-Path $imagenPath)) { return }
+  if (-not $imagenElegida -or -not (Test-Path $imagenElegida)) { return }
 
-  $img = [System.Drawing.Image]::FromFile($imagenPath)
+  $img = [System.Drawing.Image]::FromFile($imagenElegida)
 
   foreach ($screen in $screens) {
     if ($screen.DeviceName -eq $primary.DeviceName) { continue }
@@ -139,8 +165,9 @@ function CrearPantallasImagen {
 
     $pb = New-Object System.Windows.Forms.PictureBox
     $pb.Dock = 'Fill'
-    $pb.SizeMode = 'Zoom'          # o 'StretchImage' si quieres que llene todo
+    $pb.SizeMode = 'Zoom'
     $pb.Image = $img
+    $pb.Cursor = [System.Windows.Forms.Cursors]::None
     $form.Controls.Add($pb)
 
     $form.Show()
@@ -184,6 +211,10 @@ function LanzarNavegador {
 # ========== INICIO ==========
 [KeyBlocker]::Start()
 
+# Ocultar cursor del sistema
+[CursorHelper]::ShowCursor($false) | Out-Null
+[System.Windows.Forms.Cursor]::Hide()
+
 CrearPantallasImagen
 LanzarNavegador
 Start-Sleep -Milliseconds 1000
@@ -194,11 +225,13 @@ try {
 
     [Vol]::Set(1.0)
 
-    # Mantener las imágenes visibles
+    # Mantener cursor oculto y formularios arriba
+    [CursorHelper]::ShowCursor($false) | Out-Null
     foreach ($f in $script:imageForms) {
       try {
         if (-not $f.Visible) { $f.Show() }
         $f.TopMost = $true
+        $f.Cursor = [System.Windows.Forms.Cursors]::None
       } catch {}
     }
 
@@ -212,11 +245,13 @@ try {
       Start-Sleep -Milliseconds 800
     }
 
-    Start-Sleep -Milliseconds 120
+    Start-Sleep -Milliseconds 150
   }
 }
 finally {
   [KeyBlocker]::Stop()
+  [CursorHelper]::ShowCursor($true) | Out-Null
+  [System.Windows.Forms.Cursor]::Show()
   Get-Process -Name $procName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
   foreach ($f in $script:imageForms) {
     try { $f.Close(); $f.Dispose() } catch {}
