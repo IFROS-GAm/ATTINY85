@@ -1,5 +1,5 @@
 <#
-  run.ps1 - Principal: video | Secundarias: 1 imagen al azar (sin mouse)
+  run.ps1 - Principal: video (sin barras) | Secundarias: imagen al azar
   Única salida: ESC + DEL
 #>
 
@@ -13,6 +13,7 @@ $imagenesUrl = @(
 )
 $basePerfil      = Join-Path $env:TEMP 'venice_kiosk'
 $carpetaImagenes = Join-Path $env:TEMP 'kiosk_imgs'
+$htmlPath        = Join-Path $env:TEMP 'kiosk_main.html'
 
 # Descargar las imágenes
 if (-not (Test-Path $carpetaImagenes)) { New-Item -ItemType Directory -Path $carpetaImagenes | Out-Null }
@@ -27,11 +28,59 @@ foreach ($url in $imagenesUrl) {
   } catch {}
 }
 
-# Elegir UNA imagen al azar para esta ejecución
+# Elegir UNA imagen al azar
 $imagenElegida = $null
 if ($imagenesLocales.Count -gt 0) {
   $imagenElegida = $imagenesLocales | Get-Random
 }
+
+# Página local que carga el video y tapa las barras superiores
+$html = @"
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Gatitos</title>
+<style>
+  html, body {
+    margin: 0; padding: 0;
+    width: 100%; height: 100%;
+    background: #000;
+    overflow: hidden;
+    cursor: none !important;
+  }
+  iframe {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100vw; height: 100vh;
+    border: 0;
+  }
+  /* Cubre las barras de PiP / Mejorar */
+  #cover {
+    position: fixed;
+    top: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 280px;
+    height: 70px;
+    background: #000;
+    z-index: 99999;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+  <iframe src="$pageUrl" allow="autoplay; fullscreen" allowfullscreen></iframe>
+  <div id="cover"></div>
+  <script>
+    document.addEventListener('contextmenu', e => e.preventDefault());
+    document.addEventListener('keydown', e => e.preventDefault());
+  </script>
+</body>
+</html>
+"@
+[IO.File]::WriteAllText($htmlPath, $html, [Text.Encoding]::UTF8)
+$localUrl = "file:///" + ($htmlPath -replace '\\', '/')
 
 # ---------------- Bloqueo de teclas + ESC+DEL ----------------
 Add-Type -TypeDefinition @'
@@ -89,7 +138,7 @@ public static class KeyBlocker {
 }
 '@
 
-# ---------------- Ocultar cursor del sistema ----------------
+# ---------------- Ocultar cursor ----------------
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -132,7 +181,7 @@ public static class Vol {
 }
 '@
 
-# ---------------- Pantallas con imagen ----------------
+# ---------------- Pantallas secundarias ----------------
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
@@ -176,7 +225,7 @@ function CrearPantallasImagen {
   }
 }
 
-# ---------------- Navegador (solo principal) ----------------
+# ---------------- Navegador ----------------
 function Get-Nav {
   $c = @(
     "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
@@ -200,7 +249,7 @@ function LanzarNavegador {
 
   $perfil = "$basePerfil`_main"
 
-  $flags = "--kiosk `"$pageUrl`" --user-data-dir=`"$perfil`" --no-first-run " +
+  $flags = "--kiosk `"$localUrl`" --user-data-dir=`"$perfil`" --no-first-run " +
            "--no-default-browser-check --disable-session-crashed-bubble --noerrdialogs " +
            "--autoplay-policy=no-user-gesture-required --disable-infobars " +
            "--disable-notifications --disable-popup-blocking " +
@@ -216,8 +265,6 @@ function LanzarNavegador {
 
 # ========== INICIO ==========
 [KeyBlocker]::Start()
-
-# Ocultar cursor del sistema
 [CursorHelper]::ShowCursor($false) | Out-Null
 [System.Windows.Forms.Cursor]::Hide()
 
@@ -230,9 +277,8 @@ try {
     if ([KeyBlocker]::shouldExit) { break }
 
     [Vol]::Set(1.0)
-
-    # Mantener cursor oculto y formularios arriba
     [CursorHelper]::ShowCursor($false) | Out-Null
+
     foreach ($f in $script:imageForms) {
       try {
         if (-not $f.Visible) { $f.Show() }
@@ -241,7 +287,6 @@ try {
       } catch {}
     }
 
-    # Si se cerró el navegador → reabrir
     $vivo = $false
     if ($script:browserPid -gt 0) {
       $vivo = [bool](Get-Process -Id $script:browserPid -ErrorAction SilentlyContinue)
